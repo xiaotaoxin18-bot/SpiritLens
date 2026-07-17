@@ -1,0 +1,43 @@
+# SpiritLens root .gitignore
+
+# Environment files (contain API keys, secrets)
+.env
+.env*.local
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Node
+node_modules/
+.next/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
+*.pid
+
+# Uploads
+uploads/
+
+# Build artifacts
+*.tar.gz
+tmp/
+dump.rdb
+tsconfig.tsbuildinfo
+
+# Celery
+*.pid

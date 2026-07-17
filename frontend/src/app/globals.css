@@ -1,0 +1,383 @@
+@import "tailwindcss";
+
+/* =====================================================================
+   SpiritLens · 双主题设计系统
+   深色模式（默认）：赛博 / 霓虹 / 紫青
+   浅色模式（.light）：暖色调 / 工作室 / 琥珀
+   ===================================================================== */
+
+/* ── 自定义 Variants ── */
+@custom-variant light (&:where(.light, .light *));
+
+/* ══════════════════════════════════════════════════
+   主题 CSS 变量（通过 @theme inline 生成 Tailwind 工具类）
+   ══════════════════════════════════════════════════ */
+
+@theme inline {
+  /* ─── Brand Colors (共享) ─── */
+  --color-brand-deep: var(--brand-deep);
+  --color-brand-dark: var(--brand-dark);
+  --color-brand-mid: var(--brand-mid);
+  --color-brand-purple: #6c3bff;
+  --color-brand-cyan: #00d4ff;
+  --color-brand-cyan-dim: #0099c4;
+  --color-brand-glow: rgba(0, 212, 255, 0.15);
+
+  /* ─── Surface / 背景 ─── */
+  --color-surface-deep: var(--surface-deep);
+  --color-surface-base: var(--surface-base);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-card: var(--surface-card);
+  --color-surface-overlay: var(--surface-overlay);
+  --color-surface-dark: var(--surface-dark);
+  --color-surface-mid: var(--surface-mid);
+  --color-surface-light: var(--surface-light);
+
+  /* ─── Text ─── */
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  /* ─── Borders ─── */
+  --color-border-subtle: var(--border-subtle);
+  --color-border-glow: var(--border-glow);
+
+  /* ─── Accents ─── */
+  --color-accent-pink: #ff3b9e;
+  --color-accent-amber: #ffb83d;
+  --color-accent-green: #00e676;
+
+  /* ─── Shadows (light 模式 override) ─── */
+  --shadow-glow-sm: 0 0 20px rgba(0, 212, 255, 0.08);
+  --shadow-glow-md: 0 0 40px rgba(0, 212, 255, 0.12);
+  --shadow-glow-lg: 0 0 60px rgba(0, 212, 255, 0.16);
+
+  /* ─── Typography ─── */
+  --font-sans: var(--font-geist-sans), "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), "JetBrains Mono", monospace;
+
+  /* ─── Radii ─── */
+  --radius-card: 16px;
+  --radius-button: 12px;
+  --radius-input: 10px;
+
+  /* ─── Animations ─── */
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-glow-pulse: glow-pulse 3s ease-in-out infinite;
+  --animate-fade-in: fade-in 0.5s ease-out;
+  --animate-slide-up: slide-up 0.4s ease-out;
+}
+
+/* ══════════════════════════════════════════════════
+   深色模式（默认）— 赛博 · 霓虹
+   ══════════════════════════════════════════════════ */
+
+:root {
+  --brand-deep: #0d0a1a;
+  --brand-dark: #1a0a3e;
+  --brand-mid: #2a1a5e;
+
+  --surface-deep: #07050f;
+  --surface-base: #0d0d0e;
+  --surface-elevated: #0c0b14;
+  --surface-card: #141416;
+  --surface-overlay: #1d1d1e;
+  --surface-dark: #0f0b1e;
+  --surface-mid: #1a1430;
+  --surface-light: #252040;
+
+  --text-primary: #f0edff;
+  --text-secondary: #bdb7d6;
+  --text-muted: #9f98c0;
+
+  --border-subtle: rgba(108, 59, 255, 0.12);
+  --border-glow: rgba(0, 212, 255, 0.2);
+}
+
+/* ══════════════════════════════════════════════════
+   浅色模式 — 净白 · 紫韵
+   ══════════════════════════════════════════════════ */
+
+.light {
+  --brand-deep: #ece8e4;
+  --brand-dark: #e2ded9;
+  --brand-mid: #d3cfca;
+
+  --surface-deep: #f3f1ed;
+  --surface-base: #f8f6f2;
+  --surface-elevated: #fdfcfa;
+  --surface-card: #ffffff;
+  --surface-overlay: #ffffff;
+  --surface-dark: #ebe8e4;
+  --surface-mid: #e1ddd8;
+  --surface-light: #d6d2cd;
+
+  --text-primary: #1a1625;
+  --text-secondary: #5a4e70;
+  --text-muted: #7f7398;
+
+  --border-subtle: rgba(108, 59, 255, 0.08);
+  --border-glow: rgba(108, 59, 255, 0.18);
+
+  /* Purple-tinted shadows — light, airy */
+  --shadow-glow-sm: 0 0 20px rgba(108, 59, 255, 0.06);
+  --shadow-glow-md: 0 0 40px rgba(108, 59, 255, 0.10);
+  --shadow-glow-lg: 0 0 60px rgba(108, 59, 255, 0.14);
+}
+
+/* ══════════════════════════════════════════════════
+   Glass & 辅助工具类
+   ══════════════════════════════════════════════════ */
+
+.glass {
+  background: var(--surface-elevated);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-subtle);
+}
+
+.light .glass {
+  background: rgba(255, 255, 255, 0.75);
+  border-color: rgba(108, 59, 255, 0.06);
+}
+
+.glass-hover:hover {
+  border-color: var(--border-glow);
+  box-shadow: var(--shadow-glow-sm);
+  transition: all 0.3s ease;
+}
+
+/* ── Gradient text ── */
+.text-gradient {
+  background: linear-gradient(135deg, var(--text-primary) 0%, var(--color-brand-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.light .text-gradient {
+  background: linear-gradient(135deg, var(--color-brand-purple) 0%, var(--color-brand-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-purple {
+  background: linear-gradient(135deg, var(--color-brand-purple) 0%, var(--color-brand-cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ══════════════════════════════════════════════════
+   Surface & 边框 工具类（ai-tool 页面使用）
+   ══════════════════════════════════════════════════ */
+
+.surface-base { background: var(--surface-base); }
+.surface-elevated { background: var(--surface-elevated); }
+.surface-card { background: var(--surface-card); }
+.surface-overlay { background: var(--surface-overlay); }
+.border-default { border-color: var(--border-subtle); }
+
+/* ── 语义化文本色（自适应双主题）─ */
+.text-primary { color: var(--text-primary); }
+.text-secondary { color: var(--text-secondary); }
+.text-muted { color: var(--text-muted); }
+
+/* ══════════════════════════════════════════════════
+   Base Styles
+   ══════════════════════════════════════════════════ */
+
+body {
+  background: var(--surface-deep);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ══════════════════════════════════════════════════
+   Keyframes
+   ══════════════════════════════════════════════════ */
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.08); }
+  50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.2); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ─── Canvas Theme (independent from global site theme) ─── */
+/* Dark theme (default) */
+[data-canvas-theme="dark"] .canvas-bg {
+  background-color: #0f0f13;
+  background-image:
+    radial-gradient(circle, rgba(255,255,255,0.20) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+[data-canvas-theme="dark"] .canvas-text-primary { color: rgba(255,255,255,0.9); }
+[data-canvas-theme="dark"] .canvas-text-secondary { color: rgba(255,255,255,0.7); }
+[data-canvas-theme="dark"] .canvas-text-muted { color: rgba(255,255,255,0.5); }
+[data-canvas-theme="dark"] .canvas-toolbar {
+  background: rgba(0,0,0,0.3); border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.6);
+}
+[data-canvas-theme="dark"] .canvas-toolbar:hover { background: rgba(255,255,255,0.1); color: white; }
+[data-canvas-theme="dark"] .canvas-panel {
+  background: rgba(0,0,0,0.9); border-color: rgba(255,255,255,0.12);
+}
+[data-canvas-theme="dark"] .canvas-rail {
+  background: rgba(0,0,0,0.4); border-color: rgba(255,255,255,0.12);
+}
+[data-canvas-theme="dark"] .canvas-btn { color: rgba(255,255,255,0.5); background: transparent; }
+[data-canvas-theme="dark"] .canvas-btn:hover { background: rgba(255,255,255,0.1); color: white; }
+
+/* ─── Override global CSS vars inside canvas ─── */
+[data-canvas-theme="dark"] {
+  --text-primary: #f0edff;
+  --text-secondary: #bdb7d6;
+  --text-muted: #9f98c0;
+  --surface-card: #1a1a1e;
+  --surface-elevated: #15151a;
+  --surface-base: #0d0d0e;
+  --canvas-grid-color: rgba(108,59,255,0.15);
+}
+[data-canvas-theme="light"] {
+  --text-primary: #1a1625;
+  --text-secondary: #5a4e70;
+  --text-muted: #7f7398;
+  --surface-card: #2a2835;
+  --surface-elevated: #1e1c28;
+  --surface-base: #f8f6f2;
+  --canvas-grid-color: rgba(108,59,255,0.10);
+}
+/* Canvas CSS overrides — injected via inline style in canvas-editor */
+.canvas-dark-theme {
+  --text-primary: #f0edff !important;
+  --text-secondary: #c5bfd8 !important;
+  --text-muted: #a8a0c0 !important;
+  --surface-card: #1a1a1e !important;
+  --surface-overlay: #1a1a1e !important;
+}
+.canvas-light-theme {
+  --text-primary: #1a1625 !important;
+  --text-secondary: #5a4e70 !important;
+  --text-muted: #7f7398 !important;
+  --surface-card: #f0eeea !important;
+  --surface-overlay: #ffffff !important;
+}
+/* Controls panel (bottom-left) */
+[data-canvas-theme="dark"] .react-flow__controls {
+  background: rgba(15,15,19,0.85) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+  overflow: hidden !important;
+}
+[data-canvas-theme="dark"] .react-flow__controls-button {
+  background: transparent !important;
+  border-bottom: 1px solid rgba(255,255,255,0.06) !important;
+  fill: rgba(255,255,255,0.5) !important;
+  color: rgba(255,255,255,0.5) !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+[data-canvas-theme="dark"] .react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+[data-canvas-theme="dark"] .react-flow__controls-button:hover {
+  background: rgba(255,255,255,0.1) !important;
+  fill: white !important;
+  color: white !important;
+}
+[data-canvas-theme="dark"] .react-flow__controls-button svg {
+  fill: inherit !important;
+}
+
+[data-canvas-theme="light"] .react-flow__controls {
+  background: rgba(248,246,242,0.9) !important;
+  border: 1px solid rgba(108,59,255,0.1) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
+  overflow: hidden !important;
+}
+[data-canvas-theme="light"] .react-flow__controls-button {
+  background: transparent !important;
+  border-bottom: 1px solid rgba(108,59,255,0.06) !important;
+  fill: #5a4e70 !important;
+  color: #5a4e70 !important;
+  width: 32px !important;
+  height: 32px !important;
+}
+[data-canvas-theme="light"] .react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+[data-canvas-theme="light"] .react-flow__controls-button:hover {
+  background: rgba(108,59,255,0.06) !important;
+  fill: #1a1625 !important;
+  color: #1a1625 !important;
+}
+[data-canvas-theme="light"] .react-flow__controls-button svg {
+  fill: inherit !important;
+}
+
+/* Light theme */
+[data-canvas-theme="light"] .canvas-bg {
+  background-color: #f5f3ef;
+  background-image:
+    radial-gradient(circle, rgba(0,0,0,0.12) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+[data-canvas-theme="light"] .canvas-text-primary { color: #1a1625; }
+[data-canvas-theme="light"] .canvas-text-secondary { color: #5a4e70; }
+[data-canvas-theme="light"] .canvas-text-muted { color: #7f7398; }
+[data-canvas-theme="light"] .canvas-toolbar {
+  background: rgba(255,255,255,0.8); border-color: rgba(108,59,255,0.12); color: #5a4e70;
+}
+[data-canvas-theme="light"] .canvas-toolbar:hover { background: rgba(255,255,255,0.95); color: #1a1625; }
+[data-canvas-theme="light"] .canvas-panel {
+  background: rgba(255,255,255,0.95); border-color: rgba(108,59,255,0.08);
+}
+[data-canvas-theme="light"] .canvas-rail {
+  background: rgba(255,255,255,0.7); border-color: rgba(108,59,255,0.08);
+}
+[data-canvas-theme="light"] .canvas-btn { color: #5a4e70; background: transparent; }
+[data-canvas-theme="light"] .canvas-btn:hover { background: rgba(108,59,255,0.1); color: #1a1625; }
+
+/* ── Selection ── */
+::selection {
+  background: var(--color-brand-purple);
+  color: white;
+}
