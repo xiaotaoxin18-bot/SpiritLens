@@ -206,7 +206,7 @@ async def list_favorites(
                         await db.execute(
                             text("""
                                 UPDATE creations
-                                SET status = 'completed',
+                                SET status = 'COMPLETED',
                                     media_url = :media,
                                     params = CAST(:params AS jsonb),
                                     updated_at = :now
@@ -228,7 +228,7 @@ async def list_favorites(
                         await db.execute(
                             text("""
                                 UPDATE creations
-                                SET status = 'completed',
+                                SET status = 'COMPLETED',
                                     media_url = :media,
                                     params = CAST(:params AS jsonb),
                                     updated_at = :now
@@ -309,6 +309,186 @@ async def toggle_favorite(
         return {"favorited": True}
 
 
+@router.get("/assets/recover")
+async def recover_assets(
+    include_project: bool = False,
+    project_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """恢复接口：返回创作记录，含完整参数，无分页限制。
+
+    前端 IndexedDB 为空时调用此接口重建会话历史。
+    默认排除项目管理来源（source=project）——AI 工具页历史只含 AI 工具页
+    生成的记录；导演工作台恢复传入 include_project=1 以按 prompt 找回
+    丢失状态的 project 生成（2026-08-10）。
+
+    project_id（2026-08-11）：导演工作台恢复传项目 id 时，查该项目
+    **全部成员**的 project 来源记录——项目协作场景下，他人生成的视频
+    丢失状态也能被找回（原来只查当前用户，别人永远匹配不到）。
+    安全：先校验当前用户是项目成员，且只返回该项目 config 引用的 URL。
+    """
+    uid = str(current_user.id)
+
+    if project_id:
+        # ── 项目级恢复：校验成员 + 只返回该项目 config 引用的视频 ──
+        try:
+            pid = uuid.UUID(project_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="无效的项目 ID")
+        member = await db.execute(
+            text("SELECT 1 FROM project_members WHERE project_id = :pid AND user_id = :uid"),
+            {"pid": str(pid), "uid": uid},
+        )
+        if not member.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Project not found")
+        # 收集该项目所有集 config 引用的视频 URL（嵌套在 structureData.shots[].videos[]）
+        ep_rows = await db.execute(
+            text("SELECT config FROM episodes WHERE project_id = :pid"),
+            {"pid": str(pid)},
+        )
+        refs: set[str] = set()
+        for (cfg,) in ep_rows:
+            data = cfg if isinstance(cfg, dict) else (json_lib.loads(cfg) if cfg else {})
+            sd = (data or {}).get("structureData") or {}
+            for shot in sd.get("shots") or []:
+                for v in shot.get("videos") or []:
+                    if v.get("videoUrl"):
+                        refs.add(v["videoUrl"])
+                if (shot.get("interval") or {}).get("videoUrl"):
+                    refs.add(shot["interval"]["videoUrl"])
+        if not refs:
+            return {"items": []}
+        rows = await db.execute(
+            text("""
+                SELECT c.id, c.type, c.status, c.media_url, c.thumbnail_url,
+                       c.prompt, c.width, c.height, c.params, c.created_at,
+                       c.error_message
+                FROM creations c
+                WHERE c.status = 'COMPLETED'
+                  AND c.params->>'source' = 'project'
+                  AND c.media_url = ANY(:refs)
+                ORDER BY c.created_at DESC
+                LIMIT 500
+            """),
+            {"refs": list(refs)},
+        )
+        rows = rows.all()
+    else:
+        source_filter = "" if include_project else (
+            "  AND (c.params->>'source' IS NULL OR c.params->>'source' != 'project')"
+        )
+
+        rows = await db.execute(
+            text(f"""
+                SELECT c.id, c.type, c.status, c.media_url, c.thumbnail_url,
+                       c.prompt, c.width, c.height, c.params, c.created_at,
+                       c.error_message
+                FROM creations c
+                WHERE c.user_id = :uid{source_filter}
+                ORDER BY c.created_at DESC
+                LIMIT 500
+            """),
+            {"uid": uid},
+        )
+
+    items = []
+    for r in rows:
+        task_id = None
+        image_urls = []
+        media_url = r.media_url
+        status_str = r.status
+
+        params_dict = r.params if isinstance(r.params, dict) else {}
+
+        if params_dict:
+            task_id = params_dict.get("task_id")
+            image_urls = params_dict.get("image_urls", [])
+
+        # Redis fallback for stuck PROCESSING records
+        if (not image_urls or status_str == "PROCESSING") and task_id:
+            try:
+                rr = get_redis(db=1)
+                raw = rr.get(f"spiritlens:result:{task_id}")
+                if raw:
+                    res = json_lib.loads(raw)
+                    if res.get("image_urls"):
+                        image_urls = res["image_urls"]
+                    if res.get("video_url"):
+                        media_url = media_url or res["video_url"]
+                        # 视频没有独立的 image_urls 字段，构造之
+                        if not image_urls:
+                            image_urls = [res["video_url"]]
+
+                    # 持久化到 DB
+                    first_url = image_urls[0] if image_urls else (media_url or "")
+                    if first_url:
+                        new_params = dict(params_dict)
+                        if image_urls:
+                            new_params["image_urls"] = image_urls
+                        await db.execute(
+                            text("""
+                                UPDATE creations
+                                SET status = 'COMPLETED',
+                                    media_url = :media,
+                                    params = CAST(:params AS jsonb),
+                                    updated_at = NOW()
+                                WHERE id = CAST(:aid AS uuid)
+                            """),
+                            {
+                                "media": first_url,
+                                "params": json_lib.dumps(new_params),
+                                "aid": str(r.id),
+                            },
+                        )
+                        await db.commit()
+                        status_str = "completed"
+                rr.close()
+            except Exception:
+                pass
+
+        # 修复卡在 PROCESSING 但实际已有 media_url 的记录（之前 raw SQL 与 ORM 枚举名不一致）
+        if status_str == "PROCESSING" and media_url:
+            try:
+                await db.execute(
+                    text("UPDATE creations SET status = 'COMPLETED', updated_at = NOW() WHERE id = CAST(:aid AS uuid)"),
+                    {"aid": str(r.id)},
+                )
+                await db.commit()
+                status_str = "completed"
+            except Exception:
+                pass
+
+        # 提取 params 中的模型和生成参数
+        model_id = params_dict.get("model_id", "")
+        duration = params_dict.get("duration")
+        resolution = params_dict.get("resolution", "")
+        batch = params_dict.get("batch", 1)
+        negative_prompt = params_dict.get("negative_prompt", "")
+        seed = params_dict.get("seed")
+
+        items.append({
+            "id": str(r.id),
+            "type": (r.type or "").lower(),
+            "status": status_str.lower(),  # 统一小写
+            "media_url": media_url,
+            "prompt": r.prompt or "",
+            "model_id": model_id,
+            "image_urls": image_urls or ([media_url] if media_url else []),
+            "task_id": task_id,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "generation_params": {
+                "size": resolution,
+                "duration": duration,
+                "batch": batch,
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+            },
+        })
+
+    return {"items": items}
+
+
 @router.get("/assets")
 async def list_assets(
     page: int = 1,
@@ -371,7 +551,7 @@ async def list_assets(
                         await db.execute(
                             text("""
                                 UPDATE creations
-                                SET status = 'completed',
+                                SET status = 'COMPLETED',
                                     media_url = :media,
                                     params = CAST(:params AS jsonb),
                                     updated_at = :now
@@ -393,7 +573,7 @@ async def list_assets(
                         await db.execute(
                             text("""
                                 UPDATE creations
-                                SET status = 'completed',
+                                SET status = 'COMPLETED',
                                     media_url = :media,
                                     params = CAST(:params AS jsonb),
                                     updated_at = :now

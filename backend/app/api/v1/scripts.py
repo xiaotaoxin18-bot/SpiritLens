@@ -7,14 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.schemas.auth import UserOut
 from app.api.v1.auth import get_current_user
-from app.services.script_generation import generate_script, continue_script
+from app.services.script_generation import generate_script, continue_script, rewrite_script
 from app.services.script_structure import parse_script_structure
 
 router = APIRouter(prefix="/projects/{project_id}/episodes/{episode_id}/script", tags=["script"])
 
 
 class GenerateScriptRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000, description="故事梗概或主题")
+    prompt: str = Field(..., min_length=1, description="故事梗概或主题")
     duration: str = Field(default="5-10分钟", description="预估时长")
     language: str = Field(default="中文", description="语言")
     style: str = Field(default="悬疑", description="视觉风格/类型")
@@ -22,7 +22,12 @@ class GenerateScriptRequest(BaseModel):
 
 
 class ContinueScriptRequest(BaseModel):
-    direction: str = Field(..., min_length=1, max_length=1000, description="续写方向/要求")
+    direction: str = Field(..., min_length=1, description="续写方向/要求")
+    model_id: str | None = Field(default=None, description="文本模型 ID")
+
+
+class RewriteScriptRequest(BaseModel):
+    instruction: str = Field(..., min_length=1, description="改写要求")
     model_id: str | None = Field(default=None, description="文本模型 ID")
 
 
@@ -184,6 +189,48 @@ async def api_continue_script(
     content = await continue_script(
         existing_script=existing_script,
         direction=data.direction,
+        model_id=data.model_id,
+    )
+
+    return ScriptResponse(content=content)
+
+
+@router.post("/rewrite", response_model=ScriptResponse)
+async def api_rewrite_script(
+    project_id: str,
+    episode_id: str,
+    data: RewriteScriptRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """AI 改写剧本：基于现有剧本内容按用户要求修改。"""
+    from app.models.project import Project
+    from app.models.episode import Episode
+
+    pid = uuid.UUID(project_id)
+    eid = uuid.UUID(episode_id)
+    uid = uuid.UUID(current_user.id)
+
+    verify = await db.execute(
+        Project.__table__.select().where(Project.id == pid, Project.user_id == uid)
+    )
+    if not verify.first():
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    result = await db.execute(
+        Episode.__table__.select().where(Episode.id == eid, Episode.project_id == pid)
+    )
+    ep = result.first()
+    if not ep:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    existing_script = ep._mapping.get("script_content") or ""
+    if not existing_script:
+        raise HTTPException(status_code=400, detail="请先创建或输入剧本内容再改写")
+
+    content = await rewrite_script(
+        existing_script=existing_script,
+        instruction=data.instruction,
         model_id=data.model_id,
     )
 

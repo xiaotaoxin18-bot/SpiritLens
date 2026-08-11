@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { User, Lock, X, AlertCircle, Eye, EyeOff } from "lucide-react";
 import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
@@ -31,8 +30,15 @@ function validateForm(form: { account: string; password: string }): FormErrors {
   };
 }
 
+/** UTF-8 安全的 base64（密码混淆存储用，非加密） */
+function b64encode(s: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+}
+function b64decode(s: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(s), (c) => c.charCodeAt(0)));
+}
+
 export default function LoginForm() {
-  const router = useRouter();
   const { setAuth } = useAuthStore();
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -42,6 +48,7 @@ export default function LoginForm() {
   const [submitted, setSubmitted] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
+  const [remember, setRemember] = useState(false);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -49,6 +56,35 @@ export default function LoginForm() {
     const t = setTimeout(() => setToast(null), 2500);
     return () => clearTimeout(t);
   }, [toast]);
+
+  // 记住密码：localStorage 存账号 + base64 混淆的密码（防明文可见，
+  // 但 XSS 下仍可解——真正安全需浏览器密码管理器，Chrome SPA 提示不可靠）
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("spiritlens:login-remember");
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (data?.account) {
+          let pwd = "";
+          if (data.password) {
+            try {
+              pwd = b64decode(data.password); // 新格式（base64）
+            } catch {
+              pwd = data.password; // 旧版明文残留：直接用
+            }
+          }
+          setForm((prev) => ({ ...prev, account: data.account, password: pwd }));
+          setRemember(true);
+          // 迁移：旧明文 → 转 base64 存回，不留明文
+          if (data.password && pwd) {
+            localStorage.setItem("spiritlens:login-remember", JSON.stringify({
+              account: data.account, password: b64encode(pwd),
+            }));
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }, []);
 
   /** Validate a single field and update errors — only shows if field is touched or form was submitted */
   const validateField = useCallback(
@@ -135,7 +171,21 @@ export default function LoginForm() {
       }>("/api/v1/auth/me");
 
       setAuth(user, tokens.access_token, tokens.refresh_token);
-      router.push("/");
+
+      // 记住密码：存账号 + base64 混淆密码；取消勾选则清除
+      try {
+        if (remember) {
+          localStorage.setItem("spiritlens:login-remember", JSON.stringify({
+            account: form.account,
+            password: b64encode(form.password),
+          }));
+        } else {
+          localStorage.removeItem("spiritlens:login-remember");
+        }
+      } catch { /* ignore */ }
+
+      // 整页跳转：SPA router.push 不会触发 Chrome「保存密码」提示（需真实导航）
+      window.location.href = "/spiritlens";
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "登录失败，请重试";
@@ -189,9 +239,19 @@ export default function LoginForm() {
           autoComplete="current-password"
           required
         />
-        <div className="flex justify-end mt-1.5">
+        <div className="flex items-center justify-between mt-1.5">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              className="size-3.5 accent-brand-cyan"
+            />
+            <span className="text-xs text-text-muted">记住密码</span>
+          </label>
           <button
             type="button"
+            onClick={() => setToast("忘记密码请联系管理员重置")}
             className="text-xs text-text-muted hover:text-brand-cyan transition-colors"
           >
             忘记密码？

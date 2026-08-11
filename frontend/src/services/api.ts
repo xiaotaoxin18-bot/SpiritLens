@@ -93,7 +93,10 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     let detail = `HTTP ${response.status}`;
     try {
       const err = await response.json();
-      if (err.detail) detail = err.detail;
+      if (err.detail) {
+        // detail 可能是对象/数组（如 FastAPI 422 校验错误），直接 throw 会变成 "[object Object]"
+        detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
+      }
     } catch {
       // ignore
     }
@@ -130,4 +133,43 @@ export const api = {
 
   delete: <T>(endpoint: string) =>
     request<T>(endpoint, { method: "DELETE" }),
+
+  /** Upload file(s) via multipart/form-data — does NOT use JSON Content-Type */
+  uploadFile: async (endpoint: string, file: File, fieldName = "files"): Promise<{ urls: string[]; errors?: Array<{filename?: string; error: string}> }> => {
+    const url = `${BASE_URL}${endpoint}`;
+    const auth = getAuth();
+    const formData = new FormData();
+    formData.append(fieldName, file);
+
+    const headers: Record<string, string> = {};
+    if (auth?.accessToken) {
+      headers["Authorization"] = `Bearer ${auth.accessToken}`;
+    }
+
+    let response = await fetch(url, { method: "POST", headers, body: formData });
+
+    // Auto-refresh on 401
+    if (response.status === 401 && auth?.refreshToken) {
+      const refreshed = await tryRefresh();
+      if (refreshed) {
+        const newAuth = getAuth();
+        if (newAuth?.accessToken) {
+          headers["Authorization"] = `Bearer ${newAuth.accessToken}`;
+        }
+        response = await fetch(url, { method: "POST", headers, body: formData });
+      }
+    }
+
+    if (!response.ok) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const err = await response.json();
+        if (err.detail) {
+          detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
+        }
+      } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    return response.json();
+  },
 };

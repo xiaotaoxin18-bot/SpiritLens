@@ -1,49 +1,58 @@
-"""CAPTCHA service — SVG-based verification codes."""
+"""CAPTCHA service — SVG-based verification codes, Redis-backed.
 
+历史坑（2026-08-10）：之前用进程内存 dict 存 token，后端 4 个 uvicorn
+worker 各存各的——GET /captcha 落在 worker A，POST /register 轮询到
+worker B 时验证码必然报错（"验证码是对的，多点几次才成功"）。
+改 Redis 后所有 worker 共享同一份，顺带 TTL 自动过期。
+"""
+
+import hashlib
 import random
 import time
-import hashlib
-import string
 
-# ─── In-memory store ───────────────────────────────────────
-# token -> { text, expires_at }
-_store: dict[str, dict] = {}
-
-# ─── Cleanup ────────────────────────────────────────────────
 _CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # No 0/O/1/I to avoid confusion
 
+_PREFIX = "spiritlens:captcha:"
+_TTL = 300  # 5 分钟
 
-def _cleanup():
-    """Remove expired entries."""
-    now = time.time()
-    expired = [k for k, v in _store.items() if v["expires_at"] < now]
-    for k in expired:
-        _store.pop(k, None)
+
+def _redis():
+    from app.services.redis_helper import get_redis
+    return get_redis(db=0)
 
 
 def generate() -> tuple[str, str]:
     """Generate a CAPTCHA.
 
     Returns (token, svg_content).
-    The token maps to the expected text in the in-memory store (5 min TTL).
+    The token maps to the expected text in Redis (5 min TTL).
     """
-    _cleanup()
     text = "".join(random.choices(_CHARS, k=4))
     token = hashlib.sha256(
         f"{text}_{time.time()}_{random.random()}".encode()
     ).hexdigest()[:16]
-    _store[token] = {"text": text, "expires_at": time.time() + 300}
+    r = _redis()
+    try:
+        r.setex(f"{_PREFIX}{token}", _TTL, text)
+    finally:
+        r.close()
     return token, _render_svg(text)
 
 
 def verify(token: str, user_input: str) -> bool:
     """Verify a CAPTCHA token + user input (one-time use)."""
-    entry = _store.pop(token, None)
-    if not entry:
+    if not token:
         return False
-    if time.time() > entry["expires_at"]:
-        return False
-    return entry["text"].upper() == user_input.strip().upper()
+    r = _redis()
+    try:
+        key = f"{_PREFIX}{token}"
+        entry = r.get(key)
+        if entry is None:
+            return False
+        r.delete(key)  # 一次性使用：验证即消费
+    finally:
+        r.close()
+    return entry.upper() == user_input.strip().upper()
 
 
 # ─── SVG rendering ─────────────────────────────────────────

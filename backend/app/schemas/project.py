@@ -41,3 +41,8 @@ class ProjectList(BaseModel):
     page: int
     page_size: int
     projects: list[ProjectOut]
+
+
+class AddMemberRequest(BaseModel):
+    user_id: str
+    role: str = "editor"

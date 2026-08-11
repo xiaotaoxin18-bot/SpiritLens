@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -98,6 +99,8 @@ export default function ScriptStage({
   projectName,
   episodeTitle,
 }: ScriptStageProps) {
+  const { toast } = useToast();
+
   // ── State ────────────────────────────────────────────────────
   const [episode, setEpisode] = useState<EpisodeData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -123,8 +126,6 @@ export default function ScriptStage({
     customStyleInput: "",
   });
   const [qualityControl, setQualityControl] = useState(true);
-  const [isInferringStyle, setIsInferringStyle] = useState(false);
-  const styleInputRef = useRef<HTMLInputElement>(null);
 
   // AI models
   const [models, setModels] = useState<TextModel[]>([]);
@@ -135,8 +136,8 @@ export default function ScriptStage({
   const [showGeneratePanel, setShowGeneratePanel] = useState(false);
   const [generatePrompt, setGeneratePrompt] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [continueDirection, setContinueDirection] = useState("");
   const [continuing, setContinuing] = useState(false);
+  const [rewriting, setRewriting] = useState(false);
 
   // Storyboard / deconstruction
   const [storyboards, setStoryboards] = useState<Storyboard[]>([]);
@@ -317,6 +318,7 @@ export default function ScriptStage({
       await saveScript(newContent);
       setShowGeneratePanel(false);
       setGeneratePrompt("");
+      toast("剧本生成成功", "success");
 
       // Auto-run breakdown after generation
       if (newContent.trim()) {
@@ -341,8 +343,9 @@ export default function ScriptStage({
           setBreakingDown(false);
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn("[ScriptStage] AI generation failed", e);
+      toast(e?.message || "AI 生成失败", "error");
     } finally {
       setGenerating(false);
     }
@@ -351,24 +354,49 @@ export default function ScriptStage({
   // ── AI Continue ────────────────────────────────────────────
 
   const handleContinue = async () => {
-    if (!continueDirection.trim() || continuing || !scriptContent.trim()) return;
+    if (continuing || !scriptContent.trim()) return;
     setContinuing(true);
     try {
       const res = await api.post<{ content: string }>(
         `/api/v1/projects/${projectId}/episodes/${episodeId}/script/continue`,
         {
-          direction: continueDirection.trim(),
+          direction: "继续创作后续内容",
           model_id: selectedModel || undefined,
         }
       );
       const newContent = scriptContent + "\n\n" + res.content;
       setScriptContent(newContent);
       handleScriptChange(newContent);
-      setContinueDirection("");
-    } catch (e) {
+      toast("续写成功", "success");
+    } catch (e: any) {
       console.warn("[ScriptStage] AI continue failed", e);
+      toast(e?.message || "续写失败", "error");
     } finally {
       setContinuing(false);
+    }
+  };
+
+  // ── AI Rewrite ────────────────────────────────────────────
+
+  const handleRewrite = async () => {
+    if (rewriting || !scriptContent.trim()) return;
+    setRewriting(true);
+    try {
+      const res = await api.post<{ content: string }>(
+        `/api/v1/projects/${projectId}/episodes/${episodeId}/script/rewrite`,
+        {
+          instruction: "优化润色剧本，保持原有情节和人物设定",
+          model_id: selectedModel || undefined,
+        }
+      );
+      setScriptContent(res.content);
+      handleScriptChange(res.content);
+      toast("改写成功", "success");
+    } catch (e: any) {
+      console.warn("[ScriptStage] AI rewrite failed", e);
+      toast(e?.message || "改写失败", "error");
+    } finally {
+      setRewriting(false);
     }
   };
 
@@ -429,8 +457,10 @@ export default function ScriptStage({
       }
       setExtractedChars(Array.from(chars));
       setExtractedProps(Array.from(props));
-    } catch (e) {
+      toast("分镜拆解完成", "success");
+    } catch (e: any) {
       console.warn("[ScriptStage] AI breakdown failed", e);
+      toast(e?.message || "分镜拆解失败", "error");
     } finally {
       setBreakingDown(false);
     }
@@ -514,24 +544,54 @@ export default function ScriptStage({
           </span>
         </div>
 
-        {/* Save indicator */}
-        <div className="flex items-center gap-2 text-[10px] font-mono">
-          {saving ? (
-            <span className="text-text-muted flex items-center gap-1">
-              <Loader2 className="size-3 animate-spin" />
-              保存中
-            </span>
-          ) : saveStatus === "saved" ? (
-            <span className="text-accent-green flex items-center gap-1">
-              <CheckCircle className="size-3" />
-              已保存
-            </span>
-          ) : (
-            <span className="text-yellow-400 flex items-center gap-1">
-              <AlertTriangle className="size-3" />
-              未保存
-            </span>
+        <div className="flex items-center gap-3">
+          {/* 续写 button */}
+          {hasScript && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleContinue}
+                disabled={continuing}
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white text-[10px] font-bold uppercase tracking-wider hover:shadow-glow-md disabled:opacity-40 transition-all shrink-0"
+              >
+                {continuing ? <Loader2 className="size-3.5 animate-spin" /> : <Wand2 className="size-3.5" />}
+                续写
+              </button>
+            </div>
           )}
+
+          {/* AI 改写 button */}
+          {hasScript && (
+            <div className="flex items-center gap-2 border-l border-border-subtle pl-3">
+              <button
+                onClick={handleRewrite}
+                disabled={rewriting}
+                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-gradient-to-r from-accent-amber to-accent-pink text-white text-[10px] font-bold uppercase tracking-wider hover:shadow-glow-md disabled:opacity-40 transition-all shrink-0"
+              >
+                {rewriting ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                AI 改写
+              </button>
+            </div>
+          )}
+
+          {/* Save indicator */}
+          <div className="flex items-center gap-2 text-[10px] font-mono">
+            {saving ? (
+              <span className="text-text-muted flex items-center gap-1">
+                <Loader2 className="size-3 animate-spin" />
+                保存中
+              </span>
+            ) : saveStatus === "saved" ? (
+              <span className="text-accent-green flex items-center gap-1">
+                <CheckCircle className="size-3" />
+                已保存
+              </span>
+            ) : (
+              <span className="text-yellow-400 flex items-center gap-1">
+                <AlertTriangle className="size-3" />
+                未保存
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -693,65 +753,6 @@ export default function ScriptStage({
                   className="w-full rounded-lg border border-border-subtle bg-surface-card px-3 py-2 text-xs text-text-primary placeholder:text-text-muted/40 outline-none focus:border-brand-cyan/50 transition-all"
                 />
               )}
-            </div>
-
-            {/* 反推参考图 */}
-            <div className="space-y-1.5">
-              <label className="text-[10px] font-bold uppercase tracking-widest text-text-muted">反推参考图</label>
-              <button
-                onClick={() => styleInputRef.current?.click()}
-                disabled={isInferringStyle}
-                className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg border border-dashed border-border-subtle text-text-muted hover:text-text-primary hover:border-border-glow transition-all text-xs disabled:opacity-50"
-              >
-                <svg className={cn("size-4", isInferringStyle && "animate-pulse")} stroke="currentColor" fill="none" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                </svg>
-                {isInferringStyle ? "正在反推风格..." : "上传图片反推风格"}
-              </button>
-              <input
-                ref={styleInputRef}
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0];
-                  if (!file) return;
-                  setIsInferringStyle(true);
-                  try {
-                    const formData = new FormData();
-                    formData.append("files", file);
-                    const token = (() => {
-                      try {
-                        const raw = localStorage.getItem("spiritlens-auth");
-                        if (!raw) return "";
-                        const parsed = JSON.parse(raw);
-                        return parsed?.state?.accessToken || "";
-                      } catch { return ""; }
-                    })();
-                    const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/spiritlens";
-                    const res = await fetch(`${BASE_URL}/api/v1/upload`, {
-                      method: "POST",
-                      headers: token ? { Authorization: `Bearer ${token}` } : {},
-                      body: formData,
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      const url = data.urls?.[0];
-                      if (url) {
-                        // Use filename as style hint (AI reverse inference TBD)
-                        const hint = file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
-                        setConfig((c) => ({ ...c, visualStyle: hint }));
-                      }
-                    }
-                  } catch (e) {
-                    console.warn("[ScriptStage] Style inference failed", e);
-                  } finally {
-                    setIsInferringStyle(false);
-                  }
-                  e.target.value = "";
-                }}
-              />
-              <p className="text-[9px] text-text-muted/60">上传参考图片自动提取风格关键词。</p>
             </div>
 
             {/* AI 模型 */}
@@ -978,35 +979,6 @@ export default function ScriptStage({
                   />
                 </div>
 
-                {/* Continue panel */}
-                {hasScript && (
-                  <div className="shrink-0 border-t border-border-subtle">
-                    <div className="flex items-center gap-2 px-4 py-2">
-                      <div className="flex-1 flex items-center gap-2">
-                        <input
-                          value={continueDirection}
-                          onChange={(e) => setContinueDirection(e.target.value)}
-                          placeholder="输入续写方向，如：继续下一场戏、增加一段对话…"
-                          className="flex-1 bg-transparent text-xs text-text-primary placeholder:text-text-muted/50 outline-none"
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" && !e.shiftKey) {
-                              e.preventDefault();
-                              handleContinue();
-                            }
-                          }}
-                        />
-                      </div>
-                      <button
-                        onClick={handleContinue}
-                        disabled={continuing || !continueDirection.trim() || !hasScript}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-brand-cyan hover:bg-brand-cyan/10 border border-brand-cyan/20 disabled:opacity-40 transition-all shrink-0"
-                      >
-                        {continuing ? <Loader2 className="size-3 animate-spin" /> : <Wand2 className="size-3" />}
-                        续写
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
           </div>

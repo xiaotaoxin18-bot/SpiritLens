@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import {
-  Plus, MessageSquare, Trash2, ChevronLeft, PanelLeftClose, PanelLeft,
-  Image as ImageIcon, Video, Clock,
+  Plus, MessageSquare, Trash2, PanelLeftClose, PanelLeft,
+  Image as ImageIcon, Video, Clock, Home,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/store/sessions";
 
@@ -21,6 +22,7 @@ export function SessionSidebar({
   sessions, activeId, kind, onNew, onSwitch, onDelete,
 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
+  const router = useRouter();
 
   const filtered = sessions.filter((s) => s.kind === kind);
 
@@ -88,6 +90,23 @@ export function SessionSidebar({
           </div>
         </>
       )}
+
+      {/* Home button — always visible at the bottom */}
+      <div className="mt-auto border-t border-white/[0.06] light:border-black/[0.06] px-2 py-2">
+        <button
+          onClick={() => router.push("/")}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-xl text-xs font-bold transition-all shadow-sm",
+            collapsed
+              ? "justify-center p-2 text-white bg-gradient-to-r from-brand-purple to-brand-cyan-dim hover:brightness-110"
+              : "px-3 py-2.5 text-white bg-gradient-to-r from-brand-purple to-brand-cyan-dim hover:brightness-110",
+          )}
+          title="返回首页"
+        >
+          <Home className={cn("size-4", collapsed ? "" : "shrink-0")} />
+          {!collapsed && <span>返回首页</span>}
+        </button>
+      </div>
     </div>
   );
 }
@@ -102,7 +121,8 @@ function SessionItem({
 }) {
   const lastGen = session.generations[session.generations.length - 1];
   const preview = lastGen?.prompt?.slice(0, 30) || session.title;
-  const time = new Date(session.createdAt).toLocaleDateString("zh-CN", {
+  // 显示最后一条生成记录的时间（恢复的会话创建于合并当天，不能用会话创建时间）
+  const time = new Date(lastGen?.createdAt ?? session.createdAt).toLocaleDateString("zh-CN", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -140,7 +160,7 @@ function SessionItem({
             {time}
           </span>
           {successCount > 0 && (
-            <span className="text-[10px] text-accent-green/70">{successCount} 张</span>
+            <span className="text-[10px] text-accent-green/70">{successCount} {session.kind === "video" ? "个" : "张"}</span>
           )}
         </div>
       </div>

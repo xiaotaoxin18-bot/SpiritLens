@@ -1,5 +1,6 @@
 """Database configuration and session management."""
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from app.core.config import get_settings
@@ -23,8 +24,14 @@ class Base(DeclarativeBase):
 
 
 async def init_db():
-    """Create all tables."""
+    """Create all tables.
+
+    Serialized with a transaction-scoped advisory lock: uvicorn --workers=N
+    runs this concurrently from every process at startup, and concurrent
+    CREATE TABLE IF NOT EXISTS can race on pg_type_typname_nsp_index.
+    """
     async with engine.begin() as conn:
+        await conn.execute(text("SELECT pg_advisory_xact_lock(737202)"))
         from app.models import user, creation, community, ai_model, project, episode, character, scene, prop, storyboard, season  # noqa: F401
         await conn.run_sync(Base.metadata.create_all)
 

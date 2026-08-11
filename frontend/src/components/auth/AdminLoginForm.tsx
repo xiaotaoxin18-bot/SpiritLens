@@ -106,18 +106,36 @@ export default function AdminLoginForm() {
         password: form.password,
       });
 
-      setAuth({ id: "", nickname: "" }, tokens.access_token, tokens.refresh_token);
-
-      const user = await api.get<{
+      // 先用返回的 token 直接请求用户信息并校验管理员身份——此时尚未调用
+      // setAuth（会持久化写入 localStorage），非管理员不会残留任何 token
+      const base = process.env.NEXT_PUBLIC_API_URL || "/spiritlens";
+      const meRes = await fetch(`${base}/api/v1/auth/me`, {
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${tokens.access_token}`,
+        },
+      });
+      if (!meRes.ok) {
+        let detail = `HTTP ${meRes.status}`;
+        try {
+          const err = await meRes.json();
+          if (err.detail) {
+            detail = typeof err.detail === "string" ? err.detail : JSON.stringify(err.detail);
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(detail);
+      }
+      const user = (await meRes.json()) as {
         id: string;
         username?: string;
         nickname: string;
         is_admin: boolean;
-      }>("/api/v1/auth/me");
+      };
 
       if (!user.is_admin) {
         setServerError("该账号没有管理员权限");
-        setIsLoading(false);
         return;
       }
 

@@ -10,6 +10,7 @@ class CharacterCreate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class CharacterUpdate(BaseModel):
@@ -17,6 +18,7 @@ class CharacterUpdate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class CharacterOut(BaseModel):
@@ -26,6 +28,7 @@ class CharacterOut(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

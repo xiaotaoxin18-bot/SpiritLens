@@ -1,4 +1,7 @@
+"use client";
+
 import { Sparkles } from "lucide-react";
+import { useToast } from "@/components/ui/Toast";
 
 const FOOTER_LINKS = {
   产品: ["AI 图片生成", "AI 视频生成", "智能画布", "数字人"],
@@ -8,6 +11,8 @@ const FOOTER_LINKS = {
 };
 
 export default function Footer() {
+  const { toast } = useToast();
+
   return (
     <footer className="border-t border-border-subtle bg-brand-deep/80">
       <div className="w-full px-4 sm:px-8 py-12">
@@ -35,12 +40,13 @@ export default function Footer() {
               <ul className="space-y-2">
                 {links.map((link) => (
                   <li key={link}>
-                    <a
-                      href="#"
+                    <button
+                      type="button"
+                      onClick={() => toast("功能建设中", "info")}
                       className="text-sm text-text-muted hover:text-text-secondary transition-colors"
                     >
                       {link}
-                    </a>
+                    </button>
                   </li>
                 ))}
               </ul>

@@ -10,6 +10,7 @@ class PropCreate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class PropUpdate(BaseModel):
@@ -17,6 +18,7 @@ class PropUpdate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class PropOut(BaseModel):
@@ -26,6 +28,7 @@ class PropOut(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

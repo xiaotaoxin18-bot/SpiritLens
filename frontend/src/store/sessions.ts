@@ -1,13 +1,27 @@
 "use client";
 
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { persist, createJSONStorage } from "zustand/middleware";
+import { indexedDBStorage } from "@/lib/indexeddb-storage";
+
+// 安全上限：最多保留 200 个会话（IndexedDB 容量远大于 localStorage，设一个合理上限避免无限增长）
+const MAX_SESSIONS = 200;
+
+/** 淘汰最早的会话直到低于数量上限（sessions 已按最新在前排序） */
+function trimSessions(sessions: Session[], maxCount: number): Session[] {
+  if (sessions.length <= maxCount) return sessions;
+  let result = [...sessions];
+  while (result.length > maxCount) {
+    result = result.slice(0, -1); // 扔掉最旧（数组末尾）的会话
+  }
+  return result;
+}
 
 export interface GenerationResult {
   id: string;
   prompt: string;
   modelId: string;
-  status: "running" | "succeeded" | "failed";
+  status: "running" | "succeeded" | "failed" | "cancelled";
   progress: number;
   imageUrls?: string[];
   videoPosterUrl?: string;
@@ -17,7 +31,7 @@ export interface GenerationResult {
   taskId?: string;           // Backend task_id for cancellation
   creationId?: string;       // Backend creations table UUID (for deletion on cancel)
   imageParams?: { size: string; batch: number; style: string; negativePrompt?: string };
-  videoParams?: { duration: number; resolution?: string; camera?: string; size?: string };
+  videoParams?: { duration: number; resolution?: string; camera?: string; size?: string; audioUrl?: string };
   references?: string[];
   referenceMode?: string;
 }
@@ -119,6 +133,20 @@ export const useSessionStore = create<SessionState>()(
     {
       name: "spiritlens-sessions",
       version: 1,
+      storage: createJSONStorage(() => indexedDBStorage), // 使用 IndexedDB，容量可达 GB 级别
+      // 限制持久化会话数量，避免无限增长
+      partialize: (state) => {
+        const trimmed = trimSessions(state.sessions, MAX_SESSIONS);
+        const dropped = state.sessions.length - trimmed.length;
+        if (dropped > 0) {
+          console.info(`[sessions] 已自动淘汰 ${dropped} 个旧会话（上限 ${MAX_SESSIONS} 个）`);
+        }
+        return {
+          ...state,
+          sessions: trimmed,
+          activeId: trimmed.some((s) => s.id === state.activeId) ? state.activeId : (trimmed[0]?.id ?? null),
+        };
+      },
     },
   ),
 );

@@ -39,3 +39,16 @@ class UserOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class UserUpdate(BaseModel):
+    """Profile update — only provided fields are changed."""
+    nickname: Optional[str] = Field(None, min_length=1, max_length=100)
+    bio: Optional[str] = Field(None, max_length=500)
+    avatar_url: Optional[str] = Field(None, max_length=500)
+
+
+class ChangePassword(BaseModel):
+    """Change password — requires the current password for verification."""
+    old_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=6, max_length=128)

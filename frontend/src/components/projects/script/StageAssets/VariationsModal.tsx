@@ -97,7 +97,7 @@ export default function VariationsModal({
     });
 
     try {
-      const body: Record<string, any> = { prompt: clothingPrompt, model_id: modelId, size, batch: 1 };
+      const body: Record<string, any> = { prompt: clothingPrompt, model_id: modelId, size, batch: 1, source: "project" };
       if (referenceImage) {
         body.reference_images = [referenceImage];
         body.reference_dimension = "character";

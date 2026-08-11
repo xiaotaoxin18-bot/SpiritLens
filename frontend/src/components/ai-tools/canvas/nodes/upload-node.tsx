@@ -1,9 +1,10 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { UploadCloud, Trash2, ImagePlus } from "lucide-react";
+import { UploadCloud, Trash2, ImagePlus, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/services/api";
 import type { CanvasNodeData } from "../types";
 
 type UploadNodeData = CanvasNodeData & {
@@ -12,20 +13,33 @@ type UploadNodeData = CanvasNodeData & {
   upstreamImageUrls?: string[];
 };
 
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB — enforced server-side too
 
 export function UploadNode({ data: rawData, selected }: NodeProps) {
   const data = rawData as unknown as UploadNodeData;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const cover = data.imageUrls?.[0] ?? data.upstreamImageUrls?.[0];
   const hasImage = !!cover;
 
-  const onPickFile = (file: File) => {
+  const onPickFile = async (file: File) => {
     if (file.size > MAX_UPLOAD_BYTES) return;
-    const reader = new FileReader();
-    reader.onload = () => data.onSetUploadedImage?.(reader.result as string);
-    reader.readAsDataURL(file);
+    setUploading(true);
+    try {
+      const result = await api.uploadFile("/api/v1/upload", file);
+      if (result.urls?.length > 0) {
+        data.onSetUploadedImage?.(result.urls[0]);
+      }
+    } catch (err) {
+      console.error("[UploadNode] upload failed, falling back to data URL:", err);
+      // Fallback: store as data URL only if upload fails
+      const reader = new FileReader();
+      reader.onload = () => data.onSetUploadedImage?.(reader.result as string);
+      reader.readAsDataURL(file);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -101,10 +115,15 @@ export function UploadNode({ data: rawData, selected }: NodeProps) {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="nodrag absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted hover:bg-white/[0.04] light:hover:bg-black/[0.02] transition-colors group"
+            disabled={uploading}
+            className="nodrag absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted hover:bg-white/[0.04] light:hover:bg-black/[0.02] transition-colors group disabled:cursor-not-allowed"
           >
-            <UploadCloud className="size-8 opacity-30 group-hover:opacity-60 transition-opacity" />
-            <span className="text-[11px]">点击或拖拽上传</span>
+            {uploading ? (
+              <Loader2 className="size-6 animate-spin opacity-60" />
+            ) : (
+              <UploadCloud className="size-8 opacity-30 group-hover:opacity-60 transition-opacity" />
+            )}
+            <span className="text-[11px]">{uploading ? "上传中…" : "点击或拖拽上传"}</span>
             <span className="text-[10px] opacity-50">PNG / JPG / WebP ≤ 20MB</span>
           </button>
         )}

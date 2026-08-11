@@ -10,6 +10,7 @@ class SceneCreate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class SceneUpdate(BaseModel):
@@ -17,6 +18,7 @@ class SceneUpdate(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
 
 
 class SceneOut(BaseModel):
@@ -26,6 +28,7 @@ class SceneOut(BaseModel):
     description: Optional[str] = None
     image_url: Optional[str] = None
     prompt: Optional[str] = None
+    group_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

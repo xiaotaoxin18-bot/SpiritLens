@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, type ChangeEvent } from "react";
 import {
   Users, MapPin, Package, Loader2, Sparkles, RefreshCw,
-  Search, X, Archive, Link2, Plus,
+  Search, X, Archive, Link2, Plus, Upload, ImageIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 import CharacterCard from "./CharacterCard";
 import SceneCard from "./SceneCard";
 import PropCard from "./PropCard";
@@ -56,11 +57,11 @@ const SECTION_META: Record<AssetTab, {
 }> = {
   characters: {
     label: "角色定妆", sub: "Casting", icon: Users, color: "bg-brand-cyan",
-    apiEndpoint: "characters", emptyMsg: "暂无角色，请先在剧本阶段运行 AI 拆解",
+    apiEndpoint: "characters", emptyMsg: "暂无角色，点击右上角「添加」创建",
   },
   scenes: {
     label: "场景概念", sub: "Locations", icon: MapPin, color: "bg-accent-green",
-    apiEndpoint: "scenes", emptyMsg: "暂无场景数据",
+    apiEndpoint: "scenes", emptyMsg: "暂无场景，点击右上角「添加」创建",
   },
   props: {
     label: "道具清单", sub: "Props", icon: Package, color: "bg-yellow-500",
@@ -77,6 +78,7 @@ const _cache: { variations: Record<string, string[]>; turnaround: Record<string,
 };
 
 export default function StageAssets({ projectId, episodeId }: Props) {
+  const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<Record<AssetTab, StructureItem[]>>({
     characters: [], scenes: [], props: [],
@@ -85,12 +87,32 @@ export default function StageAssets({ projectId, episodeId }: Props) {
   const [generating, setGenerating] = useState<Record<string, boolean>>({});
   const [pickerTarget, setPickerTarget] = useState<{ tab: AssetTab; idx: number } | null>(null);
   const [activeTab, setActiveTab] = useState<AssetTab>("characters");
+
+  // Persist activeTab across navigation (detail page → back)
+  useEffect(() => {
+    const saved = sessionStorage.getItem("spiritlens-stage-tab");
+    if (saved === "characters" || saved === "scenes" || saved === "props") {
+      setActiveTab(saved);
+    }
+    sessionStorage.removeItem("spiritlens-stage-tab");
+  }, []);
+  const handleTabChange = (tab: AssetTab) => {
+    setActiveTab(tab);
+    sessionStorage.setItem("spiritlens-stage-tab", tab);
+  };
   const [showLibraryModal, setShowLibraryModal] = useState(false);
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [imageModels, setImageModels] = useState<{ id: string; name: string }[]>([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [variationsTarget, setVariationsTarget] = useState<{ name: string; prompt: string; extra: Record<string, string>; imageUrl?: string } | null>(null);
   const [turnaroundTarget, setTurnaroundTarget] = useState<{ name: string; prompt: string; extra: Record<string, string>; imageUrl?: string } | null>(null);
+  const [variantCounts, setVariantCounts] = useState<Record<string, number>>({});
+  const [addItemOpen, setAddItemOpen] = useState(false);
+  const [addItemName, setAddItemName] = useState("");
+  const [addItemDesc, setAddItemDesc] = useState("");
+  const [addItemImages, setAddItemImages] = useState<File[]>([]);
+  const [addItemPreviews, setAddItemPreviews] = useState<string[]>([]);
+  const [addingItem, setAddingItem] = useState(false);
 
   // ── Save aspect ratio changes to episode config ────────
   const saveAspectRatio = useCallback(async (ratio: string) => {
@@ -124,7 +146,7 @@ export default function StageAssets({ projectId, episodeId }: Props) {
           const res = await api.get<{ total: number; [key: string]: any }>(`/api/v1/projects/${projectId}/${t}`);
           const items = res[t] || [];
           if (items.length > 0) {
-            results[t] = items.map((i: any) => ({ id: i.id, name: i.name, description: i.description || "", image_url: i.image_url || "", prompt: i.prompt || "" }));
+            results[t] = items.map((i: any) => ({ id: i.id, name: i.name, description: i.description || "", image_url: i.image_url || "", prompt: i.prompt || "", group_id: i.group_id || null }));
             hasData = true;
           }
         } catch (e) { console.warn("[StageAssets] Failed to load " + t, e); }
@@ -139,14 +161,30 @@ export default function StageAssets({ projectId, episodeId }: Props) {
       // Merge: API data takes priority, fallback to episode config for empty types
       const sd = ep?.config?.structureData;
       const merged: Record<string, any[]> = { characters: [], scenes: [], props: [] };
+      const counts: Record<string, number> = {};
       for (const t of types) {
-        if (results[t].length > 0) {
-          merged[t] = results[t];
-        } else if (sd && sd[t] && sd[t].length > 0) {
-          merged[t] = sd[t].map((i: any) => ({ ...i, image_url: i.image_url || "" }));
+        let allItems = results[t];
+        if (allItems.length === 0 && sd && sd[t]) {
+          allItems = sd[t].map((i: any) => ({ ...i, image_url: i.image_url || "", group_id: null }));
+        }
+        // 计算每个主条目（group_id=null）的变体数量
+        const groupMap: Record<string, any[]> = {};
+        for (const item of allItems) {
+          const gid = item.group_id || item.id; // 无 group_id 的用自己的 id
+          if (!groupMap[gid]) groupMap[gid] = [];
+          groupMap[gid].push(item);
+        }
+        // 只显示主条目（group_id=null 或用自己 id 作为组的第一个）
+        for (const [gid, items] of Object.entries(groupMap)) {
+          const main = items.find((i: any) => !i.group_id) || items[0];
+          if (!merged[t].some((e: any) => e.id === main.id)) {
+            merged[t].push(main);
+            counts[main.id] = items.length - 1; // 变体数（减掉自身）
+          }
         }
       }
       setItems(merged as any);
+      setVariantCounts(counts);
       // Load image models
       try {
         const modelData = await api.get<{ models: { id: string; name: string; type: string; is_enabled: boolean }[] }>("/api/v1/models", { type: "image" });
@@ -188,13 +226,20 @@ export default function StageAssets({ projectId, episodeId }: Props) {
 
   // ── Actions ──────────────────────────────────────────────
 
+  // 乐观删除：先删 UI 后调后端（调用处已有 confirm 确认）；失败时 toast 提示并重新加载恢复
   const handleDelete = (tab: AssetTab, idx: number) => () => {
     const item = items[tab][idx];
-    if (item?.id) {
-      // Also delete from backend
-      api.delete(`/api/v1/projects/${projectId}/${SECTION_META[tab].apiEndpoint}/${item.id}`).catch(() => {});
+    if (!item?.id) {
+      setItems(p => ({ ...p, [tab]: p[tab].filter((_, i) => i !== idx) }));
+      return;
     }
     setItems(p => ({ ...p, [tab]: p[tab].filter((_, i) => i !== idx) }));
+    api.delete(`/api/v1/projects/${projectId}/${SECTION_META[tab].apiEndpoint}/${item.id}`)
+      .then(() => toast("删除成功", "success"))
+      .catch((e: any) => {
+        toast(e?.message || "删除失败", "error");
+        loadData(); // 失败后重新加载数据，恢复被乐观删除的卡片
+      });
   };
 
   const handleUpdateInfo = (tab: AssetTab, idx: number) => (updates: Partial<StructureItem>) => {
@@ -256,7 +301,7 @@ export default function StageAssets({ projectId, episodeId }: Props) {
         const imgSize = aspectRatio === "9:16" ? "768x1344" : aspectRatio === "1:1" ? "1024x1024" : "1344x768";
         const taskRes = await api.post<{ task_id: string; status: string }>(
           `/api/v1/image/generate`,
-          { prompt, model_id: selectedModel || "doubao-seedream-4-5-251128", size: imgSize, batch: 1 }
+          { prompt, model_id: selectedModel || "doubao-seedream-4-5-251128", size: imgSize, batch: 1, source: "project" }
         );
         if (taskRes.task_id) {
           for (let i = 0; i < 30; i++) {
@@ -329,6 +374,80 @@ export default function StageAssets({ projectId, episodeId }: Props) {
   };
 
 
+  // ── 内联添加 ────────────────────────────────────────────
+
+  const MAX_ADD_IMAGES = 15;
+  const resetAddForm = () => {
+    setAddItemName("");
+    setAddItemDesc("");
+    setAddItemImages([]);
+    setAddItemPreviews([]);
+  };
+
+  // 多选图片：追加到列表（保留已选的），软上限 15 张
+  const handleAddFiles = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    const remaining = MAX_ADD_IMAGES - addItemImages.length;
+    if (remaining <= 0) {
+      toast(`一次最多上传 ${MAX_ADD_IMAGES} 张图片`, "error");
+      return;
+    }
+    const taken = files.slice(0, remaining);
+    if (files.length > remaining) toast(`最多上传 ${MAX_ADD_IMAGES} 张，已截取前 ${remaining} 张`, "error");
+    setAddItemImages(prev => [...prev, ...taken]);
+    setAddItemPreviews(prev => [...prev, ...taken.map(f => URL.createObjectURL(f))]);
+  };
+
+  const handleRemoveAddImage = (idx: number) => {
+    setAddItemImages(prev => prev.filter((_, i) => i !== idx));
+    setAddItemPreviews(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleAddItem = async () => {
+    const name = addItemName.trim();
+    if (!name || addingItem) return;
+    setAddingItem(true);
+    try {
+      // 逐张上传，第一张作为主记录，其余作为变体（group_id 关联主记录）
+      const urls: string[] = [];
+      for (const f of addItemImages) {
+        const url = await uploadFile(f);
+        if (url) urls.push(url);
+      }
+      let savedId: string | undefined;
+      try {
+        const saved = await api.post<any>(`/api/v1/projects/${projectId}/${SECTION_META[activeTab].apiEndpoint}`, {
+          name, description: addItemDesc.trim(), image_url: urls[0] || "",
+        });
+        if (saved?.id) savedId = saved.id;
+        if (savedId) {
+          for (let i = 1; i < urls.length; i++) {
+            try {
+              await api.post(`/api/v1/projects/${projectId}/${SECTION_META[activeTab].apiEndpoint}`, {
+                name, description: addItemDesc.trim(), image_url: urls[i], group_id: savedId,
+              });
+            } catch (e) {
+              console.warn("[StageAssets] Failed to save variant", e);
+            }
+          }
+        }
+        toast(urls.length > 1 ? `添加成功（${urls.length} 张图片）` : "添加成功", "success");
+      } catch (e: any) {
+        console.warn("[StageAssets] Failed to save new item", e);
+        toast(e?.message || "保存失败，已保留本地卡片", "error");
+      }
+      const newItem: StructureItem = { name, description: addItemDesc.trim(), image_url: urls[0] || undefined };
+      if (savedId) newItem.id = savedId;
+      setItems(p => ({ ...p, [activeTab]: [...p[activeTab], newItem] }));
+      resetAddForm();
+      setAddItemOpen(false);
+    } finally {
+      setAddingItem(false);
+    }
+  };
+
   // ── Batch generate ───────────────────────────────────────
 
   const handleBatchGenerate = async (tab: AssetTab) => {
@@ -388,22 +507,6 @@ export default function StageAssets({ projectId, episodeId }: Props) {
     return <div className="h-full flex items-center justify-center"><Loader2 className="size-6 text-text-muted animate-spin" /></div>;
   }
 
-  const isAllEmpty = !items.characters.length && !items.scenes.length && !items.props.length;
-
-  if (isAllEmpty) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center max-w-md px-8">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-purple/20 to-brand-cyan/20 flex items-center justify-center mx-auto mb-6">
-            <Users className="size-8 text-brand-cyan" />
-          </div>
-          <h3 className="text-lg font-semibold text-text-primary mb-2">暂无资产数据</h3>
-          <p className="text-sm text-text-muted leading-relaxed">请先在「剧本与故事」阶段运行 AI 结构化解构。</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="h-full flex flex-col bg-surface-base overflow-hidden">
       {/* Top header bar */}
@@ -413,26 +516,6 @@ export default function StageAssets({ projectId, episodeId }: Props) {
           <span className="text-sm font-bold text-text-primary tracking-wide">角色与场景</span>
         </div>
         <div className="flex items-center gap-3">
-          {/* 添加按钮 */}
-          <button
-            onClick={async () => {
-              const name = prompt(`输入${SECTION_META[activeTab].label}名称：`);
-              if (!name?.trim()) return;
-              const newItem: StructureItem = { name: name.trim(), description: "" };
-              // Save to backend
-              try {
-                const saved = await api.post<any>(`/api/v1/projects/${projectId}/${SECTION_META[activeTab].apiEndpoint}`, {
-                  name: name.trim(), description: "",
-                });
-                if (saved?.id) newItem.id = saved.id;
-              } catch (e) { console.warn("[StageAssets] Failed to save new item", e); }
-              setItems(p => ({ ...p, [activeTab]: [...p[activeTab], newItem] }));
-            }}
-            className="px-3 py-1.5 rounded-lg bg-accent-green/10 text-accent-green hover:bg-accent-green/20 text-[10px] font-bold uppercase tracking-wider border border-accent-green/30 hover:border-accent-green/50 transition-all flex items-center gap-1.5"
-          >
-            <Plus className="size-3.5" />
-            添加
-          </button>
           {/* 资产库按钮 */}
           <button
             onClick={() => setShowLibraryModal(true)}
@@ -505,7 +588,7 @@ export default function StageAssets({ projectId, episodeId }: Props) {
           return (
             <button
               key={tab}
-              onClick={() => setActiveTab(tab)}
+              onClick={() => handleTabChange(tab)}
               className={cn(
                 "flex items-center gap-2 px-6 py-3.5 text-xs font-bold uppercase tracking-wider border-b-2 transition-all",
                 activeTab === tab
@@ -523,67 +606,156 @@ export default function StageAssets({ projectId, episodeId }: Props) {
 
       {/* Card grid */}
       <div className="flex-1 overflow-y-auto p-6">
-        {items[activeTab].length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <p className="text-sm text-text-muted">{SECTION_META[activeTab].emptyMsg}</p>
+        <div className="grid grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-3">
+          {/* 添加卡片 — 占第一个位置 */}
+          <div className="relative w-full" style={{ paddingBottom: "100%" }}>
+            <button
+              onClick={() => { setAddItemOpen(true); resetAddForm(); }}
+              className="absolute inset-0 rounded-2xl border-2 border-dashed border-brand-cyan/30 hover:border-brand-cyan/60 bg-brand-cyan/[0.03] hover:bg-brand-cyan/[0.08] transition-all flex flex-col items-center justify-center gap-1.5 text-text-muted hover:text-brand-cyan group"
+            >
+              <div className="size-8 rounded-lg border-2 border-dashed border-brand-cyan/30 group-hover:border-brand-cyan/60 flex items-center justify-center text-brand-cyan/60 group-hover:text-brand-cyan">
+                <Plus className="size-4" />
+              </div>
+              <span className="text-[11px] font-bold text-brand-cyan/80 group-hover:text-brand-cyan">
+                添加{activeTab === "characters" ? "角色" : activeTab === "scenes" ? "场景" : "道具"}
+              </span>
+            </button>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-            {items[activeTab].map((item, idx) => {
+
+          {items[activeTab].map((item, idx) => {
+              const vc = variantCounts[item.id] ?? 0;
               if (activeTab === "characters") {
                 return (
                   <CharacterCard
-                    key={idx} character={item}
+                    key={idx} projectId={projectId} character={item}
                     isGenerating={!!generating[`characters-${idx}`]}
                     onUpload={handleUpload("characters", idx)}
-                    onUploadShapeRef={handleUploadShapeRef("characters", idx)}
-                    onClearShapeRef={handleClearShapeRef("characters", idx)}
-                    onPromptSave={handlePromptSave("characters", idx)}
                     onGenerate={handleGenerate("characters", idx)}
-                    onVariations={handleVariations("characters", idx)}
-                    onTurnaround={handleTurnaround("characters", idx)}
-                    onImageClick={setPreviewUrl}
-                    onDelete={handleDelete("characters", idx)}
-                    onUpdateInfo={handleUpdateInfo("characters", idx)}
-                    onSaveToLibrary={handleSaveToLibrary("characters", idx)}
-                    onReplaceFromLibrary={handleReplaceFromLibrary("characters", idx)}
+                    onDelete={() => { if (confirm("确认删除？")) handleDelete("characters", idx)(); }}
+                    variantCount={vc}
                   />
                 );
               }
               if (activeTab === "scenes") {
                 return (
                   <SceneCard
-                    key={idx} scene={item}
+                    key={idx} projectId={projectId} scene={item}
                     isGenerating={!!generating[`scenes-${idx}`]}
                     onUpload={handleUpload("scenes", idx)}
-                    onUploadShapeRef={handleUploadShapeRef("scenes", idx)}
-                    onClearShapeRef={handleClearShapeRef("scenes", idx)}
-                    onPromptSave={handlePromptSave("scenes", idx)}
                     onGenerate={handleGenerate("scenes", idx)}
-                    onImageClick={setPreviewUrl}
-                    onDelete={handleDelete("scenes", idx)}
-                    onUpdateInfo={handleUpdateInfo("scenes", idx)}
-                    onSaveToLibrary={handleSaveToLibrary("scenes", idx)}
+                    onDelete={() => { if (confirm("确认删除？")) handleDelete("scenes", idx)(); }}
+                    variantCount={vc}
                   />
                 );
               }
               return (
                 <PropCard
-                  key={idx} prop={item}
+                  key={idx} projectId={projectId} prop={item}
                   isGenerating={!!generating[`props-${idx}`]}
                   onUpload={handleUpload("props", idx)}
-                  onPromptSave={handlePromptSave("props", idx)}
                   onGenerate={handleGenerate("props", idx)}
-                  onImageClick={setPreviewUrl}
-                  onDelete={handleDelete("props", idx)}
-                  onUpdateInfo={handleUpdateInfo("props", idx)}
-                  onSaveToLibrary={handleSaveToLibrary("props", idx)}
+                  onDelete={() => { if (confirm("确认删除？")) handleDelete("props", idx)(); }}
+                  variantCount={vc}
                 />
               );
             })}
           </div>
-        )}
       </div>
+
+      {/* 添加弹窗 */}
+      {addItemOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => { setAddItemOpen(false); resetAddForm(); }} />
+          <div className="relative w-full max-w-xl mx-4 rounded-2xl border border-border-subtle bg-surface-card shadow-2xl p-10">
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-base font-bold text-text-primary">
+                添加{activeTab === "characters" ? "角色" : activeTab === "scenes" ? "场景" : "道具"}
+              </h3>
+              <button
+                onClick={() => { setAddItemOpen(false); resetAddForm(); }}
+                className="p-1 rounded-lg text-text-muted hover:text-text-primary transition-colors"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="space-y-5">
+              {/* 名称 */}
+              <div>
+                <label className="text-[10px] font-bold font-mono uppercase tracking-wider text-text-muted mb-1.5 block">名称</label>
+                <input
+                  value={addItemName}
+                  onChange={(e) => setAddItemName(e.target.value)}
+                  placeholder={`输入${activeTab === "characters" ? "角色" : activeTab === "scenes" ? "场景" : "道具"}名称`}
+                  className="w-full rounded-xl border border-border-subtle bg-surface-base px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted/50 outline-none focus:border-brand-cyan/50 transition-all"
+                  autoFocus
+                />
+              </div>
+
+              {/* 描述 */}
+              <div>
+                <label className="text-[10px] font-bold font-mono uppercase tracking-wider text-text-muted mb-1.5 block">描述</label>
+                <textarea
+                  value={addItemDesc}
+                  onChange={(e) => setAddItemDesc(e.target.value)}
+                  rows={5}
+                  placeholder={`输入${activeTab === "characters" ? "角色" : activeTab === "scenes" ? "场景" : "道具"}描述...`}
+                  className="w-full rounded-xl border border-border-subtle bg-surface-base px-4 py-3 text-sm text-text-primary placeholder:text-text-muted/50 outline-none focus:border-brand-cyan/50 transition-all resize-none"
+                />
+              </div>
+
+              {/* 图片上传（可多选，最多 15 张） */}
+              <div>
+                <label className="text-[10px] font-bold font-mono uppercase tracking-wider text-text-muted mb-1.5 block">
+                  参考图{addItemImages.length > 0 ? `（已选 ${addItemImages.length} 张）` : ""}
+                </label>
+                {addItemImages.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {addItemPreviews.map((p, i) => (
+                      <div key={i} className="relative w-20 h-20 rounded-xl overflow-hidden border border-border-subtle">
+                        <img src={p} alt={`preview-${i}`} className="w-full h-full object-cover" />
+                        <button
+                          onClick={() => handleRemoveAddImage(i)}
+                          className="absolute top-0.5 right-0.5 p-0.5 rounded-full bg-black/60 text-white hover:bg-red-500 transition-colors"
+                        >
+                          <X className="size-3" />
+                        </button>
+                      </div>
+                    ))}
+                    <label className="flex flex-col items-center justify-center w-20 h-20 rounded-xl border-2 border-dashed border-border-subtle hover:border-brand-cyan/30 bg-surface-base cursor-pointer transition-all">
+                      <Plus className="size-4 text-text-muted" />
+                      <input type="file" accept="image/*" multiple className="hidden" onChange={handleAddFiles} />
+                    </label>
+                  </div>
+                ) : (
+                  <label className="flex flex-col items-center justify-center w-full h-44 rounded-xl border-2 border-dashed border-border-subtle hover:border-brand-cyan/30 bg-surface-base cursor-pointer transition-all">
+                    <Upload className="size-6 text-text-muted mb-2" />
+                    <span className="text-sm text-text-muted">点击上传图片（可多选）</span>
+                    <input type="file" accept="image/*" multiple className="hidden" onChange={handleAddFiles} />
+                  </label>
+                )}
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleAddItem}
+                disabled={!addItemName.trim() || addingItem}
+                className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white text-xs font-bold hover:shadow-glow-sm transition-all disabled:opacity-40 flex items-center justify-center gap-1.5"
+              >
+                {addingItem ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {addingItem ? "添加中…" : "确认添加"}
+              </button>
+              <button
+                onClick={() => { setAddItemOpen(false); resetAddForm(); }}
+                className="flex-1 py-2.5 rounded-xl border border-border-subtle text-text-muted hover:text-text-primary text-xs font-bold transition-all"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ImagePreviewModal url={previewUrl} onClose={() => setPreviewUrl(null)} />
       {showLibraryModal && (

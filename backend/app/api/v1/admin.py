@@ -12,7 +12,7 @@ from app.services import auth as auth_service
 from app.models.user import User
 from app.models.creation import Creation
 from app.models.ai_model import AiModel, ModelType
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 import redis as sync_redis
 
@@ -34,11 +34,27 @@ def _get_redis():
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+def _iso_cst(ts) -> str | None:
+    """naive DB datetime (stored as UTC) → ISO with +00:00.
+
+    浏览器 new Date("...+00:00") 会自动转本地时区（东八区），
+    否则无时区字符串会被按本地时间解析，显示差 8 小时。
+    """
+    if ts is None:
+        return None
+    return ts.replace(tzinfo=timezone.utc).isoformat()
+
+
 async def require_admin(
-    authorization: str = Header(...),
+    authorization: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """Dependency: verify the request comes from an admin user."""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未登录或登录已过期",
+        )
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token:
         raise HTTPException(
@@ -75,7 +91,9 @@ async def dashboard(
     admin: User = Depends(require_admin),
 ):
     """Dashboard statistics."""
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # 东八区「今天」0 点对应的 UTC 时刻（DB 存 UTC naive）
+    cst_now = datetime.utcnow() + timedelta(hours=8)
+    today_start = cst_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=8)
 
     # Total users
     total_users_result = await db.execute(select(func.count(User.id)))
@@ -119,7 +137,7 @@ async def dashboard(
                 "username": u.username,
                 "nickname": u.nickname,
                 "is_admin": u.is_admin,
-                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "created_at": _iso_cst(u.created_at),
             }
             for u in recent_users
         ],
@@ -225,7 +243,7 @@ async def list_users(
                 "bio": u.bio,
                 "is_admin": u.is_admin,
                 "status": u.status.value if u.status else "active",
-                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "created_at": _iso_cst(u.created_at),
             }
             for u in users
         ],
@@ -258,7 +276,7 @@ async def delete_user(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """Delete a user by ID."""
+    """Delete a user by ID (cascades their projects and all related data)."""
     result = await db.execute(
         select(User).where(User.id == uuid.UUID(user_id))
     )
@@ -267,8 +285,41 @@ async def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     if str(user.id) == str(admin.id):
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
+
+    # 注意：不能直接 db.delete(user) —— ORM 会把子表外键置 NULL（UPDATE projects
+    # SET user_id=NULL），projects.user_id 是 NOT NULL 约束 → IntegrityError 500。
+    # 先 DB 级删除用户的项目（CASCADE 链：projects → seasons/episodes/characters/
+    # scenes/props/members → storyboards），再删用户（creations/posts/favorites
+    # /comments/likes/templates 等 CASCADE；episodes.assignee_id SET NULL 可空）。
+    from sqlalchemy import text as _text
+    await db.execute(_text("DELETE FROM projects WHERE user_id = :uid"), {"uid": user.id})
     await db.delete(user)
     await db.flush()
+
+
+class AdminResetPasswordInput(BaseModel):
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+@router.post("/users/{user_id}/reset-password")
+async def reset_user_password(
+    user_id: str,
+    data: AdminResetPasswordInput,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Admin resets a user's password (temporary fallback until SMS/email reset ships)."""
+    result = await db.execute(
+        select(User).where(User.id == uuid.UUID(user_id))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if str(user.id) == str(admin.id):
+        raise HTTPException(status_code=400, detail="Cannot reset your own password")
+    user.password_hash = auth_service.hash_password(data.new_password)
+    await db.flush()
+    return {"reset": True, "user_id": str(user.id)}
 
 
 # ─── Model Management ─────────────────────────────────────────────
@@ -440,6 +491,7 @@ async def list_logs(
     type: str = "",
     status: str = "",
     q: str = "",
+    date: str = "",
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
@@ -459,6 +511,14 @@ async def list_logs(
     if q:
         like = f"%{q}%"
         query = query.where(User.nickname.ilike(like) | User.username.ilike(like))
+    if date:
+        try:
+            # 前端选的是东八区日期，DB 存 UTC naive —— 偏移 8 小时对齐
+            date_obj = date_type.fromisoformat(date) - timedelta(hours=8)
+            next_day = date_obj + timedelta(days=1)
+            query = query.where(Creation.created_at.between(date_obj, next_day))
+        except ValueError:
+            pass
 
     # Count total (without join for efficiency)
     count_query = select(func.count(Creation.id))
@@ -466,6 +526,14 @@ async def list_logs(
         count_query = count_query.where(Creation.type == type)
     if status in ("pending", "processing", "completed", "failed"):
         count_query = count_query.where(Creation.status == status)
+    if date:
+        try:
+            # 东八区日期 → UTC naive 区间（偏移 8 小时对齐）
+            date_obj = date_type.fromisoformat(date) - timedelta(hours=8)
+            next_day = date_obj + timedelta(days=1)
+            count_query = count_query.where(Creation.created_at.between(date_obj, next_day))
+        except ValueError:
+            pass
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
@@ -489,8 +557,9 @@ async def list_logs(
                 "prompt": row.Creation.prompt,
                 "status": row.Creation.status.value,
                 "model_id": (row.Creation.params or {}).get("model_id", ""),
+                "task_id": (row.Creation.params or {}).get("task_id", ""),
                 "error_message": row.Creation.error_message,
-                "created_at": row.Creation.created_at.isoformat() if row.Creation.created_at else None,
+                "created_at": _iso_cst(row.Creation.created_at),
             }
             for row in rows
         ],
@@ -524,6 +593,7 @@ async def get_settings(
         "refresh_token_expire_days": cfg.REFRESH_TOKEN_EXPIRE_DAYS,
         "upload_max_size_mb": cfg.MAX_UPLOAD_SIZE // (1024 * 1024),
         "xinghe_configured": bool(cfg.XINGHE_API_KEY),
+        "tianyi_configured": bool(cfg.TIANYI_API_KEY),
         "stability_configured": bool(cfg.STABILITY_API_KEY),
         "bfl_configured": bool(cfg.BFL_API_KEY),
     }

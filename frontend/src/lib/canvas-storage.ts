@@ -28,9 +28,15 @@ export function getCanvasProjects(): CanvasProject[] {
   }
 }
 
-export function saveCanvasProjects(projects: CanvasProject[]): void {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+export function saveCanvasProjects(projects: CanvasProject[]): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    localStorage.setItem(PROJECTS_KEY, JSON.stringify(projects));
+    return true;
+  } catch (e) {
+    console.warn("[Canvas] localStorage quota exceeded while saving projects, data may be lost");
+    return false;
+  }
 }
 
 export function createCanvasProject(title?: string): CanvasProject {
@@ -132,4 +138,26 @@ export function extractThumbnail(nodes: unknown[]): string | undefined {
     if (poster) return poster;
   }
   return undefined;
+}
+
+/** Estimate localStorage usage (in bytes) for all canvas keys */
+export function getCanvasStorageUsage(): { usedBytes: number; usedMB: string; quotaMB: string; percent: number } {
+  if (typeof window === "undefined") return { usedBytes: 0, usedMB: "0", quotaMB: "5", percent: 0 };
+  let totalBytes = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && (key.startsWith("spiritlens:canvas:"))) {
+      const val = localStorage.getItem(key);
+      if (val) totalBytes += key.length + val.length;
+    }
+  }
+  // Assume ~5MB quota (common for most browsers)
+  const quotaEstimate = 5 * 1024 * 1024;
+  const usedMB = (totalBytes / (1024 * 1024)).toFixed(2);
+  return {
+    usedBytes: totalBytes,
+    usedMB,
+    quotaMB: "5",
+    percent: Math.min(100, Math.round((totalBytes / quotaEstimate) * 100)),
+  };
 }

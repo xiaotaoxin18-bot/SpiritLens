@@ -14,10 +14,13 @@ import {
   ArrowLeft,
   Sun,
   Moon,
+  KeyRound,
+  CheckCircle2,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 import { cn } from "@/lib/utils";
 
 interface UserItem {
@@ -43,12 +46,27 @@ export default function AdminUsersPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuthStore();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { toast } = useToast();
   const [mounted, setMounted] = useState(false);
   const [data, setData] = useState<UsersResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [confirmDelete, setConfirmDelete] = useState<UserItem | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserItem | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
+  const [resetSuccess, setResetSuccess] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // Auto-dismiss reset success toast
+  useEffect(() => {
+    if (!resetSuccess) return;
+    const t = setTimeout(() => setResetSuccess(null), 3000);
+    return () => clearTimeout(t);
+  }, [resetSuccess]);
 
   useEffect(() => {
     setMounted(true);
@@ -82,23 +100,61 @@ export default function AdminUsersPage() {
     }
   }, [fetchUsers, isAuthenticated, user]);
 
-  const handleToggleAdmin = async (userId: string) => {
+  const handleToggleAdmin = async (u: UserItem) => {
+    const wasAdmin = u.is_admin;
     try {
-      await api.put(`/api/v1/admin/users/${userId}/toggle-admin`);
+      await api.put(`/api/v1/admin/users/${u.id}/toggle-admin`);
       fetchUsers();
-    } catch {
-      // ignore
+      toast(wasAdmin ? "已取消管理员" : "已设为管理员", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "操作失败", "error");
     }
   };
 
   const handleDeleteUser = async () => {
     if (!confirmDelete) return;
+    setDeleting(true);
     try {
       await api.delete(`/api/v1/admin/users/${confirmDelete.id}`);
+      toast("用户已删除", "success");
       setConfirmDelete(null);
       fetchUsers();
-    } catch {
-      // ignore
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "删除失败", "error");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const openResetDialog = (u: UserItem) => {
+    setResetTarget(u);
+    setNewPassword("");
+    setConfirmPassword("");
+    setResetError(null);
+  };
+
+  const handleResetPassword = async () => {
+    if (!resetTarget) return;
+    if (newPassword.length < 6) {
+      setResetError("密码至少 6 位");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setResetError("两次输入的密码不一致");
+      return;
+    }
+    setResetSubmitting(true);
+    setResetError(null);
+    try {
+      await api.post(`/api/v1/admin/users/${resetTarget.id}/reset-password`, {
+        new_password: newPassword,
+      });
+      setResetTarget(null);
+      setResetSuccess(`已重置 ${resetTarget.nickname} 的密码`);
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : "重置失败，请重试");
+    } finally {
+      setResetSubmitting(false);
     }
   };
 
@@ -113,7 +169,9 @@ export default function AdminUsersPage() {
   const totalPages = data ? Math.ceil(data.total / data.page_size) : 1;
 
   return (
-    <div className="p-8">
+    <div className="h-screen flex flex-col overflow-hidden">
+      <div className="flex-1 overflow-y-auto">
+        <div className="p-8">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
@@ -157,10 +215,10 @@ export default function AdminUsersPage() {
 
       {/* Table */}
       <div className="rounded-2xl border border-border-subtle bg-surface-card overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm table-fixed">
+        <div className="overflow-x-auto overflow-y-auto max-h-[calc(100vh-280px)]">
+          <table className="w-full text-sm table-fixed min-w-[900px]">
             <thead>
-              <tr className="border-b border-border-subtle bg-surface-elevated/50">
+              <tr className="border-b border-border-subtle bg-surface-elevated sticky top-0 z-10">
                 <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[22%]">用户</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[12%]">账号</th>
                 <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[18%]">邮箱</th>
@@ -238,7 +296,7 @@ export default function AdminUsersPage() {
                     <td className="px-4 py-3.5 text-center whitespace-nowrap">
                       <div className="flex items-center justify-center gap-1">
                         <button
-                          onClick={() => handleToggleAdmin(u.id)}
+                          onClick={() => handleToggleAdmin(u)}
                           disabled={u.id === user?.id}
                           title={u.id === user?.id ? "不能修改自己的权限" : u.is_admin ? "取消管理员" : "设为管理员"}
                           className={cn(
@@ -254,14 +312,24 @@ export default function AdminUsersPage() {
                           {u.is_admin ? "取消管理" : "设为管理"}
                         </button>
                         {u.id !== user?.id && (
-                          <button
-                            onClick={() => setConfirmDelete(u)}
-                            title="删除用户"
-                            className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
-                          >
-                            <Trash2 className="size-3.5" />
-                            删除
-                          </button>
+                          <>
+                            <button
+                              onClick={() => openResetDialog(u)}
+                              title="重置密码"
+                              className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs text-brand-cyan hover:bg-brand-cyan/10 transition-colors"
+                            >
+                              <KeyRound className="size-3.5" />
+                              重置密码
+                            </button>
+                            <button
+                              onClick={() => setConfirmDelete(u)}
+                              title="删除用户"
+                              className="inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs text-red-400 hover:bg-red-500/10 transition-colors"
+                            >
+                              <Trash2 className="size-3.5" />
+                              删除
+                            </button>
+                          </>
                         )}
                       </div>
                     </td>
@@ -298,6 +366,84 @@ export default function AdminUsersPage() {
         )}
       </div>
 
+      {/* Reset password dialog */}
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setResetTarget(null)} />
+          <div className="relative w-full max-w-sm rounded-2xl border border-border-subtle bg-surface-card p-6 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex size-10 items-center justify-center rounded-xl bg-brand-cyan/10">
+                <KeyRound className="size-5 text-brand-cyan" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-text-primary">重置密码</h3>
+                <p className="text-sm text-text-muted mt-0.5">
+                  为 <span className="font-medium text-text-primary">{resetTarget.nickname}</span> 设置新密码
+                </p>
+              </div>
+            </div>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">新密码</label>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="至少 6 位"
+                  className="w-full rounded-xl border border-border-subtle bg-surface-elevated px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-brand-cyan/50 focus:ring-2 focus:ring-brand-cyan/10 transition-all"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5">确认新密码</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="再次输入新密码"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleResetPassword();
+                  }}
+                  className="w-full rounded-xl border border-border-subtle bg-surface-elevated px-4 py-2.5 text-sm text-text-primary placeholder:text-text-muted outline-none focus:border-brand-cyan/50 focus:ring-2 focus:ring-brand-cyan/10 transition-all"
+                />
+              </div>
+              {resetError && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-xs text-red-400">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>{resetError}</span>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-3 mt-6">
+              <button
+                onClick={() => setResetTarget(null)}
+                disabled={resetSubmitting}
+                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light disabled:opacity-50 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleResetPassword}
+                disabled={resetSubmitting}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-brand-cyan px-4 py-2 text-sm font-medium text-[#0d0d0e] hover:opacity-90 disabled:opacity-50 transition-all"
+              >
+                {resetSubmitting && <Loader2 className="size-3.5 animate-spin" />}
+                确认重置
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset success toast */}
+      {resetSuccess && (
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2">
+          <div className="inline-flex items-center gap-2 rounded-2xl border border-accent-green/30 bg-surface-overlay/95 px-5 py-3 text-sm text-text-secondary shadow-lg backdrop-blur-xl">
+            <CheckCircle2 className="size-4 text-accent-green" />
+            <span>{resetSuccess}</span>
+          </div>
+        </div>
+      )}
+
       {/* Confirm delete dialog */}
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -320,20 +466,25 @@ export default function AdminUsersPage() {
             <div className="flex items-center justify-end gap-3">
               <button
                 onClick={() => setConfirmDelete(null)}
-                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light transition-colors"
+                disabled={deleting}
+                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light disabled:opacity-50 transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={handleDeleteUser}
-                className="rounded-xl bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 transition-colors"
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
+                {deleting && <Loader2 className="size-3.5 animate-spin" />}
                 确认删除
               </button>
             </div>
           </div>
         </div>
       )}
+        </div>
+      </div>
     </div>
   );
 }

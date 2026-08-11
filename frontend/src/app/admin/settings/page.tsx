@@ -23,6 +23,7 @@ interface SystemConfig {
   refresh_token_expire_days: number;
   upload_max_size_mb: number;
   xinghe_configured: boolean;
+  tianyi_configured: boolean;
   stability_configured: boolean;
   bfl_configured: boolean;
 }
@@ -250,6 +251,10 @@ export default function AdminSettingsPage() {
                 {(() => {
                   const x = providerStatus("星河智云", config.xinghe_configured);
                   return <InfoRow label="星河智云" value={x.value} status={x.status} />;
+                })()}
+                {(() => {
+                  const t = providerStatus("天翼云", config.tianyi_configured);
+                  return <InfoRow label="天翼云" value={t.value} status={t.status} />;
                 })()}
                 {(() => {
                   const s = providerStatus("Stability AI", config.stability_configured);

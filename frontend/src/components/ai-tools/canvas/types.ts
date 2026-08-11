@@ -14,6 +14,7 @@ export interface ImageParams {
   quality?: number; // 1-10 画质强度
   negativePrompt?: string;
   seed?: number;
+  autoAspect?: boolean; // true=允许上游文本自动修改比例, false=用户已手动修改
 }
 
 /* ─── Node Data ─── */
@@ -61,9 +62,6 @@ export interface CanvasNodeData {
   onSendToVideo?: () => void;
   onSetUploadedImage?: (url: string) => void;
   onImageChange?: (url?: string) => void;
-
-  // Video node specific
-  inputImageUrl?: string;
 
   // Text node specific
   onTextChange?: (text: string) => void;

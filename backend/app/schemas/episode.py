@@ -1,3 +1,5 @@
+
+
 """Episode schemas."""
 
 from pydantic import BaseModel, Field
@@ -12,6 +14,7 @@ class EpisodeCreate(BaseModel):
     cover_url: Optional[str] = None
     season_id: Optional[str] = None
     config: Optional[dict] = None
+    assignee_id: Optional[str] = Field(None, description="负责该集的用户ID")
 
 
 class EpisodeUpdate(BaseModel):
@@ -22,6 +25,10 @@ class EpisodeUpdate(BaseModel):
     cover_url: Optional[str] = None
     season_id: Optional[str] = None
     config: Optional[dict] = None
+    assignee_id: Optional[str] = Field(None, description="负责该集的用户ID")
+    # 乐观锁（2026-08-10）：客户端上次 GET 到的 updated_at；服务器更新后
+    # 若 updated_at 已变 → 409，前端重拉合并重试（防多人编辑互相覆盖）
+    if_updated_before: Optional[datetime] = None
 
 
 class EpisodeOut(BaseModel):
@@ -31,6 +38,7 @@ class EpisodeOut(BaseModel):
     episode_number: int
     title: str
     status: str
+    assignee_id: Optional[str] = None
     script_content: Optional[str] = None
     config: Optional[Any] = None
     cover_url: Optional[str] = None

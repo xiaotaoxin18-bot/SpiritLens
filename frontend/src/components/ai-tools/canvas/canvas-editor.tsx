@@ -2,12 +2,13 @@
 
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import {
   ReactFlow, Background, Controls, BackgroundVariant,
   applyNodeChanges, applyEdgeChanges, addEdge,
   type Node, type Edge, type NodeChange, type EdgeChange, type Connection,
   useReactFlow,
+  useStoreApi,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
@@ -26,6 +27,7 @@ import {
   updateCanvasProject,
   extractThumbnail,
   getCanvasData,
+  getCanvasStorageUsage,
 } from "@/lib/canvas-storage";
 import type {
   CanvasNodeData, CanvasNodeKind, AddNodeAction, TemplateId, FlowNodeData,
@@ -79,6 +81,31 @@ const VIDEO_SIZE_PRESETS = [
   { label: "1080p", value: "1920x1080" },
 ];
 
+/* ─── Aspect ratio parser: extract size from prompt text ─── */
+function parseAspectRatio(text: string): string | null {
+  // Direct ratio match: "16:9", "9:16", "4:3", "3:4", "3:2", "21:9"
+  const ratioMatch = text.match(/(\d+)\s*[:：]\s*(\d+)/);
+  if (ratioMatch) {
+    const w = parseInt(ratioMatch[1]);
+    const h = parseInt(ratioMatch[2]);
+    // Find matching preset by ratio
+    for (const preset of SIZE_PRESETS) {
+      const [pw, ph] = preset.value.split("x").map(Number);
+      if (pw / ph === w / h) return preset.value;
+    }
+  }
+  // Keyword match
+  const lower = text.toLowerCase();
+  if (/竖屏|竖图|9[：:]?16/.test(lower)) return "1440x2560";
+  if (/横屏|横图|16[：:]?9/.test(lower)) return "2560x1440";
+  if (/方图|方形|正方|1[：:]?1/.test(lower)) return "1920x1920";
+  if (/4[：:]?3/.test(lower)) return "2304x1728";
+  if (/3[：:]?[4４]/.test(lower)) return "1728x2304";
+  if (/3[：:]?2/.test(lower)) return "2496x1664";
+  if (/21[：:]?9/.test(lower)) return "3024x1296";
+  return null;
+}
+
 /* ─── Props ─── */
 interface Props {
   onBack?: () => void;
@@ -106,19 +133,56 @@ function loadCanvasState(projectId?: string): { nodes: Node<FlowNodeData>[]; edg
   return { nodes: [], edges: [] };
 }
 
+function getViewportKey(projectId?: string): string {
+  return projectId ? `spiritlens:canvas:vp:${projectId}` : "spiritlens:canvas:vp";
+}
+function saveViewport(vp: { x: number; y: number; zoom: number }, projectId?: string) {
+  try { localStorage.setItem(getViewportKey(projectId), JSON.stringify(vp)); } catch { /* ignore */ }
+}
+function loadViewport(projectId?: string): { x: number; y: number; zoom: number } | null {
+  try {
+    const raw = localStorage.getItem(getViewportKey(projectId));
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
 function saveCanvasStateToKey(nodes: Node<FlowNodeData>[], edges: Edge[], projectId?: string) {
   if (typeof window === "undefined") return;
   const key = getCanvasKey(projectId);
   try {
     // Strip ephemeral callbacks before saving (they can't be serialized)
-    const cleanNodes = nodes.map((n) => ({
+    let cleanNodes = nodes.map((n) => ({
       ...n,
       data: Object.fromEntries(
         Object.entries(n.data).filter(([k]) => !k.startsWith("on") && k !== "upstreamPrompts" && k !== "upstreamImageUrls" && k !== "inputImageUrl" && k !== "canvasModels" && k !== "supportedSizes" && k !== "taskId")
       ),
     }));
+
+    // Check storage before writing — if > 80% full, warn & trim old image data
+    const usage = getCanvasStorageUsage();
+    if (usage.percent > 80) {
+      console.warn(`[Canvas] localStorage ${usage.usedMB}MB / ~5MB — trimming image data`);
+      cleanNodes = cleanNodes.map((n) => {
+        const data = n.data as Record<string, unknown>;
+        // Keep only the first image URL, drop the rest (batch extras consume space)
+        const urls = data.imageUrls as string[] | undefined;
+        if (urls && urls.length > 1) {
+          data.imageUrls = [urls[0]];
+        }
+        // Drop video poster URL if already has video URL (it can be derived)
+        if (data.videoUrl && data.videoPosterUrl) {
+          delete data.videoPosterUrl;
+        }
+        return { ...n, data };
+      });
+    }
+
     localStorage.setItem(key, JSON.stringify({ nodes: cleanNodes, edges }));
-  } catch { /* ignore */ }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "QuotaExceededError") {
+      console.error("[Canvas] localStorage quota exceeded — canvas data not saved. Some images may be lost on refresh.");
+    }
+  }
 }
 
 export function CanvasEditor({ onBack, projectId }: Props) {
@@ -138,10 +202,18 @@ export function CanvasEditor({ onBack, projectId }: Props) {
       setNodes(saved.nodes);
       setEdges(saved.edges);
     }
+    // Restore saved viewport and persist it immediately
+    const vp = loadViewport(projectId);
+    if (vp) {
+      rf.setViewport(vp);
+      saveViewport(vp, projectId); // persist restored viewport in case rf.setViewport doesn't trigger onViewportChange
+    }
     setHydrated(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const storeApi = useStoreApi();
+  const pendingNodeUpdates = useRef<string[]>([]);
 
   // Add-node panel state
   const [addPanel, setAddPanel] = useState<{
@@ -336,15 +408,35 @@ export function CanvasEditor({ onBack, projectId }: Props) {
     [rf],
   );
 
-  /* ─── Update node data ─── */
+  /* ─── Update node data, then trigger React Flow to re-measure internals ─── */
   const updateNodeData = useCallback(
     (id: string, patch: Partial<CanvasNodeData>) => {
+      pendingNodeUpdates.current.push(id);
       setNodes((ns) =>
-        ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)),
+        ns.map((n) => {
+          if (n.id !== id) return n;
+          const merged = { ...n.data, ...patch } as FlowNodeData;
+          return { ...n, data: merged };
+        }),
       );
     },
     [],
   );
+
+  /* ─── After render, tell ReactFlow to recalculate handle positions ─── */
+  useLayoutEffect(() => {
+    if (pendingNodeUpdates.current.length === 0) return;
+    const ids = [...new Set(pendingNodeUpdates.current)];
+    pendingNodeUpdates.current = [];
+    const { domNode, updateNodeInternals } = storeApi.getState();
+    if (!domNode) return;
+    const updates = new Map();
+    ids.forEach((id) => {
+      const el = domNode.querySelector(`.react-flow__node[data-id="${id}"]`);
+      if (el) updates.set(id, { id, nodeElement: el, force: true });
+    });
+    if (updates.size > 0) updateNodeInternals(updates);
+  });
 
   /* ─── Delete node ─── */
   const deleteNode = useCallback((id: string) => {
@@ -358,9 +450,25 @@ export function CanvasEditor({ onBack, projectId }: Props) {
   const onSelectionChange = useCallback(
     ({ nodes: selNodes }: { nodes: Node[] }) => {
       setSelectedNodeId(selNodes.length === 1 ? selNodes[0].id : null);
+      setIsMultiSelect(selNodes.length > 1);
     },
     [],
   );
+
+  /* ─── Interaction tracking — hide floating panels during drag/select ─── */
+  const [isDragging, setIsDragging] = useState(false);
+  const [isMultiSelect, setIsMultiSelect] = useState(false);
+  const onNodeDragStart = useCallback(() => setIsDragging(true), []);
+  const onNodeDragStop = useCallback(() => setIsDragging(false), []);
+  const onSelectionStart = useCallback(() => {
+    // Immediately hide panels when selection gesture starts
+    setIsDragging(true);
+    setIsMultiSelect(true);
+  }, []);
+  const onSelectionEnd = useCallback(() => {
+    // Don't reset here — let onSelectionChange handle final state
+    setIsDragging(false);
+  }, []);
 
   /* ─── Real API Generate: Image ─── */
   const startImageGeneration = useCallback(
@@ -433,8 +541,9 @@ export function CanvasEditor({ onBack, projectId }: Props) {
 
   /* ─── Real API Generate: Video ─── */
   const startVideoGeneration = useCallback(
-    (nodeId: string, prompt: string, modelId: string, referenceImageUrl: string) => {
-      updateNodeData(nodeId, { status: "running", progress: 0, errorMessage: undefined, inputImageUrl: referenceImageUrl });
+    (nodeId: string, prompt: string, modelId: string, referenceImages: string[], duration?: number, size?: string) => {
+      const firstRef = referenceImages[0] || "";
+      updateNodeData(nodeId, { status: "running", progress: 0, errorMessage: undefined, inputImageUrl: firstRef });
 
       let taskId = "";
       const pollInterval = setInterval(async () => {
@@ -469,8 +578,9 @@ export function CanvasEditor({ onBack, projectId }: Props) {
       pollingMap.current.set(nodeId, pollInterval);
 
       api.post<{ task_id: string }>("/api/v1/video/generate", {
-        prompt, model_id: modelId, size: "1280x720",
-        reference_images: referenceImageUrl ? [referenceImageUrl] : undefined,
+        prompt, model_id: modelId, size: size ?? "1280x720",
+        duration: duration ?? 5,
+        reference_images: referenceImages.length > 0 ? referenceImages : undefined,
       }).then((res) => {
         taskId = res.task_id;
         updateNodeData(nodeId, { taskId: res.task_id });
@@ -553,7 +663,7 @@ export function CanvasEditor({ onBack, projectId }: Props) {
       };
 
       if (kind === "image") {
-        baseData.imageParams = { size: "1024x1024", batch: 1, style: "general" };
+        baseData.imageParams = { size: "1024x1024", batch: 1, style: "general", autoAspect: true };
       }
 
       // Actual rendered dimensions per node type
@@ -649,6 +759,10 @@ export function CanvasEditor({ onBack, projectId }: Props) {
         extra.canvasModels = imageModels;
         extra.supportedSizes = imageModels.find((m) => m.id === n.data.modelId)?.supported_sizes || SIZE_PRESETS;
         extra.onParamsChange = (patch: Record<string, unknown>) => {
+          // When user manually changes size, disable auto-aspect so upstream text won't override
+          if ("size" in patch) {
+            patch.autoAspect = false;
+          }
           updateNodeData(n.id, {
             imageParams: { ...n.data.imageParams, ...patch } as CanvasNodeData["imageParams"],
           });
@@ -695,6 +809,19 @@ export function CanvasEditor({ onBack, projectId }: Props) {
         extra.inputImageSize = up.imageSize;
         extra.canvasModels = videoModels;
         extra.supportedSizes = VIDEO_SIZE_PRESETS;
+        extra.upstreamImageUrls = up.imageUrls;
+        extra.videoDuration = (n.data as CanvasNodeData).videoParams?.duration ?? 5;
+        extra.videoSize = (n.data as CanvasNodeData).videoParams?.resolution ?? "1280x720";
+        extra.onDurationChange = (d: number) => {
+          updateNodeData(n.id, {
+            videoParams: { ...((n.data as CanvasNodeData).videoParams || {}), duration: d },
+          });
+        };
+        extra.onVideoSizeChange = (s: string) => {
+          updateNodeData(n.id, {
+            videoParams: { ...((n.data as CanvasNodeData).videoParams || {}), resolution: s },
+          });
+        };
         extra.onGenerate = () => {
           const own = (n.data.prompt ?? "").trim();
           const upstreamTexts = up.prompts.filter((p: string) => p.trim());
@@ -710,9 +837,10 @@ export function CanvasEditor({ onBack, projectId }: Props) {
           } else {
             p = "";
           }
-          const ref = up.imageUrls[0];
-          if (!ref || !p) return;
-          startVideoGeneration(n.id, p, n.data.modelId, ref);
+          if (!p) return;
+          const dur = (n.data as CanvasNodeData).videoParams?.duration ?? 5;
+          const sz = (n.data as CanvasNodeData).videoParams?.resolution ?? "1280x720";
+          startVideoGeneration(n.id, p, n.data.modelId, up.imageUrls, dur, sz);
         };
       } else if (n.data.kind === "text") {
         extra.onTextChange = (text: string) => updateNodeData(n.id, { prompt: text });
@@ -722,9 +850,9 @@ export function CanvasEditor({ onBack, projectId }: Props) {
         };
       }
 
-      return { ...n, data: { ...n.data, ...extra } as FlowNodeData };
+      return { ...n, data: { ...n.data, ...extra, isMultiSelect } as FlowNodeData };
     });
-  }, [nodes, deleteNode, updateNodeData, startImageGeneration, startVideoGeneration, resolveUpstream, addNode]);
+  }, [nodes, deleteNode, updateNodeData, startImageGeneration, startVideoGeneration, resolveUpstream, addNode, isMultiSelect]);
 
   /* ─── Auto-trigger img2img when upstream image data is ready ─── */
   useEffect(() => {
@@ -746,6 +874,31 @@ export function CanvasEditor({ onBack, projectId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [edges, nodes]);
 
+  /* ─── Auto-select aspect ratio from upstream text ─── */
+  useEffect(() => {
+    for (const e of edges) {
+      const src = nodes.find((n) => n.id === e.source);
+      const tgt = nodes.find((n) => n.id === e.target);
+      if (!src || !tgt) continue;
+      if (tgt.data.kind !== "image") continue;
+
+      const params = (tgt.data as CanvasNodeData).imageParams;
+      if (!params || params.autoAspect === false) continue;
+
+      // Collect text from ALL upstream text nodes (including transitive)
+      const up = resolveUpstream(tgt.id);
+      for (const prompt of up.prompts) {
+        const size = parseAspectRatio(prompt);
+        if (size && size !== params.size) {
+          updateNodeData(tgt.id, {
+            imageParams: { ...params, size, autoAspect: true },
+          });
+          break; // Only apply first matched size
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edges, nodes]);
   return (
     <div
       ref={wrapperRef}
@@ -810,16 +963,20 @@ export function CanvasEditor({ onBack, projectId }: Props) {
         onConnectStart={onConnectStart}
         onConnectEnd={onConnectEnd}
         onSelectionChange={onSelectionChange}
+        onSelectionStart={onSelectionStart}
+        onSelectionEnd={onSelectionEnd}
         onPaneClick={onPaneClick}
-        panOnDrag={[0, 1]}
-        selectionOnDrag={false}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
+        panOnDrag={[1, 2]}
+        selectionOnDrag={true}
         nodeTypes={NODE_TYPES}
-        defaultViewport={{ x: 400, y: 200, zoom: 0.85 }}
+        onViewportChange={(vp) => saveViewport(vp, projectId)}
         fitView={false}
         proOptions={{ hideAttribution: true }}
         minZoom={0.1}
         maxZoom={3}
-        deleteKeyCode={["Backspace", "Delete"]}
+        deleteKeyCode={["Delete"]}
         className="!bg-transparent"
       >
         {/* ComfyUI grid lines at 48px, auto-scales with zoom */}

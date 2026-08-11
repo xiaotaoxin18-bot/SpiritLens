@@ -52,6 +52,7 @@ export default function CommunityGallery() {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [likingIds, setLikingIds] = useState<Set<string>>(new Set());
+  const [loadingMore, setLoadingMore] = useState(false);
   const [imgRatios, setImgRatios] = useState<Record<string, number>>({});
   const pageSize = 20;
 
@@ -73,6 +74,8 @@ export default function CommunityGallery() {
   }, [activeTab]);
 
   const loadMore = async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
     const next = page + 1;
     const sort = activeTab.sort;
     try {
@@ -83,6 +86,8 @@ export default function CommunityGallery() {
       setPage(next);
     } catch {
       // ignore
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -258,8 +263,12 @@ export default function CommunityGallery() {
           {/* Load More */}
           {posts.length < total && (
             <div className="flex justify-center mt-8 sm:mt-10">
-              <Button variant="secondary" size="lg" onClick={loadMore}>
-                加载更多作品
+              <Button variant="secondary" size="lg" onClick={loadMore} disabled={loadingMore}>
+                {loadingMore ? (
+                  <><Loader2 className="size-4 animate-spin" />加载中...</>
+                ) : (
+                  "加载更多作品"
+                )}
               </Button>
             </div>
           )}

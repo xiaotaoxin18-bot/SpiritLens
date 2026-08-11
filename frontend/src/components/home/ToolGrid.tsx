@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 const TOOLS = [
   {
     title: "AI 图片生成",
-    description: "文生图 / 图生图，把你的想象变成画作",
+    description: "文生图 / 图生图，让你的想象变成现实",
     href: "/ai-tool/image",
     icon: Image,
     gradient: "from-brand-purple to-brand-cyan",
@@ -18,25 +18,25 @@ const TOOLS = [
   },
   {
     title: "AI 视频生成",
-    description: "文生视频 / 首尾帧 / 动作模仿，让画面动起来",
+    description: "文生视频 / 图生视频，让画面动起来",
     href: "/ai-tool/video",
     icon: Video,
     gradient: "from-accent-pink to-accent-amber",
     color: "text-accent-pink",
-    badge: "新功能",
+    badge: "热门",
   },
   {
     title: "智能画布",
-    description: "局部重绘 / 一键扩图 / 智能抠图 / AI 融合",
+    description: "无限画布 / AI 融合创作",
     href: "/ai-tool/canvas",
     icon: Layout,
     gradient: "from-accent-amber to-accent-green",
     color: "text-accent-amber",
-    badge: undefined,
+    badge: "新功能",
   },
   {
     title: "项目管理",
-    description: "剧名 → 上传剧本 → AI 拆解分镜 → 场景/角色/道具提取 → 生成",
+    description: "从剧本到成片，AI 全流程辅助创作",
     href: "/projects",
     icon: Briefcase,
     gradient: "from-brand-cyan to-accent-pink",
@@ -60,9 +60,9 @@ const item = {
 
 export default function ToolGrid() {
   return (
-    <section className="w-full px-4 sm:px-8 py-16">
-      <div className="text-center mb-12">
-        <h2 className="text-2xl sm:text-3xl font-bold text-text-primary mb-3">
+    <section className="w-full px-4 sm:px-8 pt-0 pb-12 mt-[15px] tool-grid">
+      <div className="text-center mb-8">
+        <h2 className="text-2xl sm:text-3xl font-bold text-text-primary mb-2">
           选择你的创作工具
         </h2>
         <p className="text-text-muted text-sm">
@@ -120,12 +120,12 @@ export default function ToolGrid() {
                   <h3 className={cn("text-lg font-semibold mb-2", tool.color)}>
                     {tool.title}
                   </h3>
-                  <p className="text-sm text-text-secondary flex-1">
+                  <p className="text-sm text-text-secondary">
                     {tool.description}
                   </p>
 
                   {/* Action */}
-                  <div className="flex items-center gap-1 mt-4 text-xs text-text-muted group-hover:text-brand-cyan transition-colors">
+                  <div className="flex items-center gap-1 mt-auto pt-4 text-xs text-text-muted group-hover:text-brand-cyan transition-colors">
                     <span>{tool.comingSoon ? "即将上线" : "开始使用"}</span>
                     {!tool.comingSoon && <ArrowRight className="w-3 h-3" />}
                   </div>

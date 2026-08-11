@@ -31,6 +31,10 @@ class Episode(Base):
     status: Mapped[EpisodeStatus] = mapped_column(
         SAEnum(EpisodeStatus), default=EpisodeStatus.DRAFT
     )
+    assignee_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
+        comment="负责该集的用户"
+    )
     script_content: Mapped[str | None] = mapped_column(Text)
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict, comment="JSON config: duration, style, mode, aspect_ratio, etc.")
     cover_url: Mapped[str | None] = mapped_column(String(500))

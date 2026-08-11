@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   ImageDown,
   Palette,
+  HardDrive,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
@@ -18,6 +19,7 @@ import {
   getCanvasProjects,
   createCanvasProject,
   deleteCanvasProject,
+  getCanvasStorageUsage,
   type CanvasProject,
 } from "@/lib/canvas-storage";
 import { api } from "@/services/api";
@@ -31,6 +33,8 @@ export default function CanvasListingPage() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [storage, setStorage] = useState({ usedMB: "0", percent: 0 });
 
   useEffect(() => {
     setMounted(true);
@@ -52,6 +56,8 @@ export default function CanvasListingPage() {
     try {
       const list = getCanvasProjects();
       setProjects(list);
+      const usage = getCanvasStorageUsage();
+      setStorage({ usedMB: usage.usedMB, percent: usage.percent });
     } catch {
       setProjects([]);
     } finally {
@@ -61,6 +67,8 @@ export default function CanvasListingPage() {
 
   const handleCreate = (e?: React.FormEvent) => {
     e?.preventDefault();
+    if (creating) return;
+    setCreating(true);
     const project = createCanvasProject(projectName.trim() || undefined);
     setShowCreateDialog(false);
     setProjectName("");
@@ -119,6 +127,29 @@ export default function CanvasListingPage() {
               </div>
             </div>
           </div>
+          {/* Storage indicator */}
+          <div className="flex items-center gap-2" title={`本地存储 ${storage.usedMB} MB / ~5 MB`}>
+            <HardDrive className="size-3.5 text-text-muted" />
+            <div className="w-20 h-1.5 rounded-full bg-white/[0.08] light:bg-black/[0.06] overflow-hidden">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  storage.percent > 90
+                    ? "bg-red-500"
+                    : storage.percent > 70
+                      ? "bg-amber-500"
+                      : "bg-brand-cyan"
+                )}
+                style={{ width: `${Math.min(100, storage.percent)}%` }}
+              />
+            </div>
+            <span className={cn(
+              "text-[10px] font-mono",
+              storage.percent > 90 ? "text-red-400" : "text-text-muted"
+            )}>
+              {storage.usedMB}MB
+            </span>
+          </div>
         </header>
 
         {isLoading ? (
@@ -156,23 +187,19 @@ export default function CanvasListingPage() {
                     if (deleteConfirmId !== proj.id)
                       router.push(`/ai-tool/canvas/${proj.id}`);
                   }}
-                  className="group relative rounded-2xl border border-border-subtle hover:border-border-glow bg-surface-card flex flex-col cursor-pointer transition-all overflow-hidden min-h-[260px]"
+                  className="group relative rounded-2xl border border-border-subtle hover:border-border-glow bg-surface-card cursor-pointer transition-all overflow-hidden"
                 >
-                  {/* Thumbnail area */}
-                  <div className="h-32 bg-surface-elevated flex items-center justify-center overflow-hidden">
-                    {proj.thumbnailUrl ? (
-                      <img
-                        src={proj.thumbnailUrl}
-                        alt={proj.title}
-                        className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center gap-2 text-text-muted/40">
-                        <Palette className="size-8" />
-                        <span className="text-[10px] font-mono">暂无预览</span>
-                      </div>
-                    )}
-                  </div>
+                  {/* Delete button — top-right */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteConfirmId(proj.id);
+                    }}
+                    className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all z-10"
+                    title="删除画布"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
 
                   {/* Delete overlay */}
                   {deleteConfirmId === proj.id && (
@@ -214,26 +241,14 @@ export default function CanvasListingPage() {
                     </div>
                   )}
 
-                  {/* Content */}
-                  <div className="flex-1 p-5 relative flex flex-col">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeleteConfirmId(proj.id);
-                      }}
-                      className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 p-2 hover:bg-surface-elevated text-text-muted hover:text-red-400 transition-all rounded-xl z-10"
-                      title="删除画布"
-                    >
-                      <Trash2 className="size-3.5" />
-                    </button>
-
-                    <div className="flex-1">
-                      <h3 className="text-sm font-bold text-text-primary mb-1.5 line-clamp-1 tracking-wide">
+                  {/* Title + date */}
+                  <div className="p-5 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <h3 className="text-sm font-bold text-text-primary line-clamp-1 tracking-wide flex-1 min-w-0">
                         {proj.title}
                       </h3>
                     </div>
-
-                    <div className="flex items-center gap-2 text-[10px] font-mono text-text-muted pt-3 border-t border-border-subtle">
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-text-muted">
                       <Clock className="size-3" />
                       <span>{formatDate(proj.updatedAt)}</span>
                     </div>
@@ -296,8 +311,10 @@ export default function CanvasListingPage() {
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-3 rounded-xl bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white text-sm font-bold transition-all hover:shadow-glow-md"
+                  disabled={creating}
+                  className="flex flex-1 items-center justify-center gap-2 py-3 rounded-xl bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white text-sm font-bold transition-all hover:shadow-glow-md disabled:opacity-60"
                 >
+                  {creating && <Loader2 className="size-4 animate-spin" />}
                   创建
                 </button>
               </div>

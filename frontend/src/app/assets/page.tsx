@@ -9,6 +9,7 @@ import {
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { useToast } from "@/components/ui/Toast";
 import { api } from "@/services/api";
+import { downloadMedia } from "@/lib/download";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -38,9 +39,13 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [favoritingIds, setFavoritingIds] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [batchProgress, setBatchProgress] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewType, setPreviewType] = useState<"image" | "video">("image");
+  const [previewDownloading, setPreviewDownloading] = useState(false);
 
   const load = useCallback(() => {
     api.get<{ items: AssetItem[]; total: number }>("/api/v1/user/assets?page_size=100")
@@ -87,23 +92,24 @@ export default function AssetsPage() {
     toast(`已删除 ${ok} 个作品`, ok > 0 ? "success" : "error");
   };
 
-  const handleBatchDownload = () => {
-    let ok = 0;
-    for (const id of selected) {
-      const item = items.find((i) => i.id === id);
-      const raw = item?.image_urls?.[0] || item?.media_url;
-      if (!raw) continue;
-      const url = raw.startsWith("http") ? raw : `${API_BASE}${raw}`;
-      const a = document.createElement("a");
-      a.href = `${API_BASE}/api/v1/image/download?url=${encodeURIComponent(url)}`;
-      a.download = `spiritlens-${id}.png`;
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      ok++;
+  const handleBatchDownload = async () => {
+    if (busy || selected.size === 0) return;
+    setBusy(true);
+    try {
+      let ok = 0;
+      for (const id of selected) {
+        const item = items.find((i) => i.id === id);
+        const raw = item?.image_urls?.[0] || item?.media_url;
+        if (!raw) continue;
+        const url = raw.startsWith("http") ? raw : `${API_BASE}${raw}`;
+        const isVideo = item.type === "video";
+        const done = await downloadMedia(url, `spiritlens-${id}.${isVideo ? "mp4" : "png"}`, { isVideo });
+        if (done) ok++;
+      }
+      toast(`开始下载 ${ok} 个文件`, "success");
+    } finally {
+      setBusy(false);
     }
-    toast(`开始下载 ${ok} 个文件`, "success");
   };
 
   const handleBatchPublish = async () => {
@@ -125,7 +131,9 @@ export default function AssetsPage() {
     }
   };
 
-  const handleToggleFavorite = async (id: string, _current: boolean) => {
+  const handleToggleFavorite = async (id: string) => {
+    if (favoritingIds.has(id)) return;
+    setFavoritingIds((prev) => new Set(prev).add(id));
     try {
       const res = await api.post<{ favorited: boolean }>(
         `/api/v1/user/assets/${id}/favorite`,
@@ -137,6 +145,12 @@ export default function AssetsPage() {
       );
     } catch {
       toast("操作失败，请重试", "error");
+    } finally {
+      setFavoritingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -209,7 +223,7 @@ export default function AssetsPage() {
 
             <button onClick={handleBatchDownload} disabled={selCount === 0 || busy}
               className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-border-subtle px-3 text-xs text-text-secondary hover:bg-surface-light transition-colors disabled:opacity-50">
-              <Download className="size-3.5" />
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               下载
             </button>
 
@@ -248,7 +262,13 @@ export default function AssetsPage() {
               return (
                 <div key={item.id}
                   className={cn("break-inside-avoid mb-3 sm:mb-4 group cursor-pointer", isSelected && "relative")}
-                  onClick={() => selectMode && toggleSelect(item.id)}>
+                  onClick={() => {
+                    if (selectMode) { toggleSelect(item.id); return; }
+                    if (displayUrl && !isProcessing) {
+                      setPreviewUrl(imgUrl(displayUrl));
+                      setPreviewType(item.type === "video" ? "video" : "image");
+                    }
+                  }}>
                   <div className={cn("relative overflow-hidden rounded-2xl bg-surface-card transition-all", isSelected && "ring-2 ring-brand-cyan")}>
                     {/* Selection checkbox */}
                     {selectMode && (
@@ -261,9 +281,9 @@ export default function AssetsPage() {
 
                     {/* Favorite heart — visible on hover outside select mode */}
                     {!selectMode && !isProcessing && !isFailed && (
-                      <button onClick={(e) => { e.stopPropagation(); handleToggleFavorite(item.id, item.is_favorited); }}
+                      <button onClick={(e) => { e.stopPropagation(); handleToggleFavorite(item.id); }}
                         className="absolute right-2 top-2 z-10 flex size-7 items-center justify-center rounded-full bg-black/40 text-white/60 opacity-0 transition-all hover:bg-red-500/60 hover:text-white group-hover:opacity-100">
-                        <Heart className={cn("size-3.5", item.is_favorited && "fill-red-400 text-red-400")} />
+                        {favoritingIds.has(item.id) ? <Loader2 className="size-3.5 animate-spin" /> : <Heart className={cn("size-3.5", item.is_favorited && "fill-red-400 text-red-400")} />}
                       </button>
                     )}
 
@@ -322,6 +342,56 @@ export default function AssetsPage() {
               );
             })}
           </div>
+
+        {/* Preview modal */}
+        {previewUrl && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in"
+            onClick={() => setPreviewUrl(null)}
+          >
+            <button
+              onClick={() => setPreviewUrl(null)}
+              className="absolute right-4 top-4 flex size-10 items-center justify-center rounded-full bg-white/10 text-white/70 hover:bg-white/20 hover:text-white transition-colors"
+            >
+              <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <a
+              href={`${API_BASE}/api/v1/${previewType === "video" ? "video" : "image"}/download?url=${encodeURIComponent(previewUrl)}`}
+              download
+              className="absolute right-16 top-4 flex size-10 items-center justify-center rounded-full bg-white/10 text-white/70 hover:bg-white/20 hover:text-white transition-colors"
+              title="下载"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (previewDownloading) return;
+                setPreviewDownloading(true);
+                downloadMedia(previewUrl, `spiritlens-${previewType}.${previewType === "video" ? "mp4" : "png"}`, { isVideo: previewType === "video" })
+                  .finally(() => setPreviewDownloading(false));
+              }}
+            >
+              {previewDownloading ? <Loader2 className="size-5 animate-spin" /> : <svg className="size-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>}
+            </a>
+            <div onClick={(e) => e.stopPropagation()} className="max-h-[90vh] max-w-[90vw]">
+              {previewType === "video" ? (
+                <video
+                  src={previewUrl}
+                  className="max-h-[90vh] max-w-[90vw] rounded-2xl shadow-2xl"
+                  controls
+                  autoPlay
+                  playsInline
+                >
+                  您的浏览器不支持视频播放
+                </video>
+              ) : (
+                <img
+                  src={previewUrl}
+                  alt="预览"
+                  className="max-h-[90vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl"
+                />
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </AuthGuard>
   );

@@ -62,15 +62,7 @@ async def generate_script(
                 f"{config['base']}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {config['key']}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": config["model"],
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT_GENERATE},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": 4096,
+                    
                     "temperature": 0.8,
                 },
             )
@@ -99,7 +91,6 @@ SYSTEM_PROMPT_CONTINUE = """你是一个短剧/影视剧本续写专家。根据
 2. 续写部分与原文自然衔接；
 3. 使用相同格式（场景标题/△标记/对白）；
 4. 直接输出续写内容，不重复原文，不要评价。"""
-
 
 async def continue_script(
     existing_script: str,
@@ -152,6 +143,69 @@ async def continue_script(
     return _mock_continuation(direction)
 
 
+# ── Rewrite existing script ────────────────────────────────────
+
+SYSTEM_PROMPT_REWRITE = """你是一个短剧/影视剧本修改专家。根据用户提供的修改要求，对现有剧本进行修改。
+
+要求：
+1. 严格遵循用户的修改要求进行改写；
+2. 保持原剧本的基本框架和人物设定；
+3. 使用相同格式（场景标题/△标记/对白）；
+4. 输出完整的修改后的剧本（包含未修改的部分），不要遗漏内容；
+5. 直接输出剧本，不要评价。"""
+
+
+async def rewrite_script(
+    existing_script: str,
+    instruction: str,
+    model_id: str | None = None,
+) -> str:
+    """Rewrite/modify an existing script based on user instruction."""
+    config = _resolve_model(model_id)
+    if not config or not config.get("key"):
+        logger.warning("No LLM configured — returning mock rewrite")
+        return _mock_rewrite(existing_script, instruction)
+
+    user_prompt = (
+        f"已有剧本：\n{existing_script[:8000]}\n\n"
+        f"修改要求：{instruction}\n\n"
+        "请输出完整的修改后的剧本（保留未修改的部分）。"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=180) as client:
+            resp = await client.post(
+                f"{config['base']}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {config['key']}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": config["model"],
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT_REWRITE},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.7,
+                },
+            )
+
+            if resp.status_code != 200:
+                logger.warning("Script rewrite API returned %d: %s", resp.status_code, resp.text[:300])
+                return _mock_rewrite(existing_script, instruction)
+
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if content:
+                return content.strip()
+
+    except Exception as e:
+        logger.error("Script rewrite failed: %s", e)
+
+    return _mock_rewrite(existing_script, instruction)
+
+
 # ── Helpers ────────────────────────────────────────────────────
 
 def _resolve_model(model_id: str | None) -> dict | None:
@@ -194,6 +248,11 @@ def _mock_generated_script(prompt: str, duration: str, style: str) -> str:
 △林浩震惊地看着手中的钥匙，它在阳光下发出一丝微弱的光芒。
 
 （AI 生成 | 风格：{style} | 时长：{duration} | 基于：{prompt}）"""
+
+
+def _mock_rewrite(existing: str, instruction: str) -> str:
+    """Return a mock rewritten script when LLM is unavailable."""
+    return existing + f"\n\n（AI 改写 | 要求：{instruction}）"
 
 
 def _mock_continuation(direction: str) -> str:

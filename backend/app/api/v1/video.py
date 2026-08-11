@@ -2,85 +2,59 @@
 
 POST /api/v1/video/generate  — submit video generation task
 GET  /api/v1/video/status/{task_id}  — poll task status
+POST /api/v1/video/tasks/{task_id}/cancel  — cancel a task
+POST /api/v1/video/tasks/{task_id}/retry  — retry a cancelled/failed task
+
+Generation runs in the Celery worker (queue: video), not in this process.
+Progress/results are written to Redis by the worker; the frontend polls
+GET /status/{task_id}, so the API contract is unchanged.
 """
 
 # 维护说明：本模块承载对外 API 边界，注释重点说明权限校验、查询条件、事务提交和异常语义，避免后续改动破坏接口契约。
 
+import json
 import logging
-import asyncio
-import threading
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.celery_app import celery_app
 from app.core.database import get_db
 from app.schemas.generation import VideoGenerationRequest, TaskStatusResponse
-from app.services.generation import create_task, get_task, _save_task, update_progress, complete_task, fail_task
+from app.services.generation import create_task, get_task, _save_task, update_progress
+from app.tasks import generate_video as celery_generate_video
 from app.models.creation import Creation, CreationType, CreationStatus
 from app.models.user import User
 from app.api.v1.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
-# Track running video generation threads for cancellation
-_running_tasks: dict[str, threading.Event] = {}
 
+def _dispatch_video(task_id: str, params: dict):
+    """Dispatch a video generation task to the Celery queue.
 
-async def _save_video_to_db(task_id: str, result: dict, db_url: str):
-    """Persist video generation result to PostgreSQL creations table."""
+    Uses ``task_id=`` so Celery's task id equals the SpiritLens task id —
+    ``revoke(task_id)`` then works directly. On dispatch failure the task is
+    marked failed so the frontend never polls a forever-pending task.
+    """
     try:
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
-        from sqlalchemy import text
-        engine = create_async_engine(db_url, echo=False, pool_size=1)
-        async with sessionmaker(engine, class_=AsyncSession)() as session:
-            video_url = result.get("video_url", "")
-            await session.execute(
-                text("""
-                    UPDATE creations
-                    SET status = 'completed',
-                        media_url = :media,
-                        params = jsonb_set(
-                            COALESCE(params, '{}'::jsonb),
-                            '{video_url}',
-                            to_jsonb(:video_url)
-                        ),
-                        updated_at = NOW()
-                    WHERE params->>'task_id' = :task_id
-                """),
-                {"task_id": task_id, "media": video_url, "video_url": video_url},
-            )
-            await session.commit()
-        await engine.dispose()
-        logger.info("Saved video result to DB: task_id=%s media=%.80s", task_id, video_url)
+        celery_generate_video.apply_async(
+            task_id=task_id,
+            kwargs=params,
+        )
     except Exception as exc:
-        logger.warning("Failed to persist video result to DB (non-fatal): %s", exc, exc_info=True)
+        logger.exception("Failed to dispatch video task: %s", task_id)
+        try:
+            from app.services.redis_helper import get_redis
+            r = get_redis(db=1)
+            r.set(f"spiritlens:result:{task_id}", json.dumps({"error": f"任务提交失败: {exc}"[:500]}))
+            r.hset(f"spiritlens:task:{task_id}", mapping={"status": "failed", "error_message": f"任务提交失败: {exc}"[:500]})
+            r.close()
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="生成任务提交失败，请稍后重试")
 
-
-async def _save_video_error_to_db(task_id: str, error: str, db_url: str):
-    """Persist video generation error to PostgreSQL creations table."""
-    try:
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
-        from sqlalchemy import text
-        engine = create_async_engine(db_url, echo=False, pool_size=1)
-        async with sessionmaker(engine, class_=AsyncSession)() as session:
-            await session.execute(
-                text("""
-                    UPDATE creations
-                    SET status = 'failed',
-                        error_message = :error,
-                        updated_at = NOW()
-                    WHERE params->>'task_id' = :task_id
-                """),
-                {"task_id": task_id, "error": error[:500]},
-            )
-            await session.commit()
-        await engine.dispose()
-        logger.info("Saved video error to DB: task_id=%s error=%.80s", task_id, error)
-    except Exception as exc:
-        logger.warning("Failed to persist video error to DB (non-fatal): %s", exc, exc_info=True)
 
 router = APIRouter(prefix="/video", tags=["video"])
 
@@ -96,6 +70,11 @@ async def create_video_generation(
     Returns immediately with a task_id. Poll GET /status/{task_id}
     to check completion.
     """
+    # 防自动化批量提交：同用户 60 秒内 > 10 次 → 429
+    from app.services.redis_helper import check_generate_rate
+    if not await check_generate_rate(str(current_user.id), "video"):
+        raise HTTPException(status_code=429, detail="提交过于频繁，请稍后再试")
+
     # Convert aspect-ratio like "16:9" to pixel dimensions for the API
     _ASPECT_MAP = {
         "16:9": "1280x720",
@@ -108,9 +87,13 @@ async def create_video_generation(
     if "x" not in effective_resolution:
         effective_resolution = req.resolution or "1280x720"
 
+    # Resolve provider from model_id
+    from app.services.providers import resolve_provider
+    provider = resolve_provider(req.model_id)
+
     # Create task record (stored in Redis via generation.py)
     task = create_task(
-        provider="xinghe",
+        provider=provider,
         model_id=req.model_id,
         prompt=req.prompt,
         params={
@@ -119,6 +102,7 @@ async def create_video_generation(
             "camera": "",
             "reference_mode": req.reference_mode,
             "reference_images": req.reference_images,
+            "reference_audio": req.reference_audio,
         },
     )
 
@@ -141,74 +125,24 @@ async def create_video_generation(
             "duration": req.duration,
             "resolution": effective_resolution,
             "camera": "",
+            "source": req.source,  # ai-tool / project —— AI 工具页历史恢复时排除 project
         },
     )
     db.add(creation)
     await db.flush()
 
-    # Run video generation in background thread
-    import asyncio
-    from app.services.providers.xinghe import generate_video as xinghe_generate
-    from app.services.generation import update_progress
-
-    async def _video_progress(p: int, status: str):
-        await update_progress(task.task_id, p, status)
-
-    def _run_task():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            if cancel_event.is_set():
-                return
-
-            result = loop.run_until_complete(xinghe_generate(
-                prompt=req.prompt,
-                model_id=req.model_id,
-                duration=req.duration,
-                resolution=effective_resolution,
-                camera="",
-                reference_images=req.reference_images or None,
-                cancel_event=cancel_event,
-                progress_callback=_video_progress,
-            ))
-            # Save result to both Redis keys so API can find it
-            import json
-            try:
-                from app.services.redis_helper import get_redis
-                r = get_redis(db=1)
-                r.set(f"spiritlens:result:{task.task_id}", json.dumps(result))
-                r.hset(f"spiritlens:task:{task.task_id}", mapping={
-                    "status": "completed",
-                    "progress": "100",
-                    "video_url": result.get("video_url", ""),
-                    "video_poster_url": result.get("video_poster_url", ""),
-                })
-                r.close()
-            except Exception:
-                pass
-
-            # Always persist to PG so admin logs show completion
-            loop.run_until_complete(_save_video_to_db(task.task_id, result, get_settings().DATABASE_URL))
-        except Exception as e:
-            logger.exception("Video generation failed")
-            try:
-                from app.services.redis_helper import get_redis
-                r = get_redis(db=1)
-                r.set(f"spiritlens:result:{task.task_id}", json.dumps({"error": str(e)}))
-                r.hset(f"spiritlens:task:{task.task_id}", mapping={"status": "failed", "error_message": str(e)})
-                r.close()
-            except Exception:
-                pass
-            cfg2 = get_settings()
-            loop.run_until_complete(_save_video_error_to_db(task.task_id, str(e), cfg2.DATABASE_URL))
-        finally:
-            _running_tasks.pop(task.task_id, None)
-            loop.close()
-
-    cancel_event = threading.Event()
-    _running_tasks[task.task_id] = cancel_event
-    t = threading.Thread(target=_run_task, daemon=True)
-    t.start()
+    # Dispatch to the Celery video worker
+    _dispatch_video(task.task_id, {
+        "task_id": task.task_id,
+        "model_id": req.model_id,
+        "prompt": req.prompt,
+        "duration": req.duration,
+        "resolution": effective_resolution,
+        "camera": "",
+        "reference_mode": req.reference_mode,
+        "reference_images": req.reference_images,
+        "reference_audio": req.reference_audio,
+    })
 
     return TaskStatusResponse(
         task_id=task.task_id,
@@ -221,21 +155,117 @@ async def create_video_generation(
 
 @router.post("/tasks/{task_id}/cancel")
 async def cancel_video_generation(task_id: str):
-    """Cancel a running video generation task."""
-    event = _running_tasks.get(task_id)
-    if event:
-        event.set()  # Signal the thread to stop
-    # Mark as cancelled in Redis
-    from app.services.redis_helper import get_redis
+    """Cancel a running video generation task.
+
+    Writes the Redis cancel flag (the worker's progress callback checks it and
+    aborts via the provider's poll loop) and revokes the Celery task so queued
+    tasks never start. Marks the task cancelled so the frontend sees it at once.
+    """
+    # 1. Revoke the Celery task (works for queued / prefetched-but-unstarted
+    #    tasks; the Redis flag handles tasks already running)
     try:
+        celery_app.control.revoke(task_id, terminate=False, timeout=1)
+    except Exception as e:
+        logger.warning("Celery revoke failed for %s: %s", task_id, e)
+
+    # 2. Cancel flag consumed by the worker's progress callback
+    try:
+        from app.services.redis_helper import get_redis
         r = get_redis(db=1)
+        r.set(f"spiritlens:cancel:{task_id}", "1", ex=24 * 3600)
+        # 3. Mark as cancelled in Redis for the status endpoint
         r.hset(f"spiritlens:task:{task_id}", mapping={"status": "cancelled", "progress": "0"})
-        r.set(f"spiritlens:result:{task_id}", "{\"status\":\"cancelled\"}")
+        r.set(f"spiritlens:result:{task_id}", '{"status":"cancelled"}')
         r.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to mark video task %s as cancelled: %s", task_id, e)
     await update_progress(task_id, 0, "cancelled")
     return {"status": "cancelled"}
+
+
+@router.post("/tasks/{task_id}/retry", response_model=TaskStatusResponse)
+async def retry_video_generation(
+    task_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retry a cancelled or failed video generation task.
+
+    Creates a new task with the same parameters as the original.
+    Returns the new task_id.
+    """
+    task = await get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="原任务不存在")
+
+    if task.status not in ("cancelled", "failed"):
+        raise HTTPException(status_code=400, detail=f"任务状态为 {task.status}，不可重跑（仅支持 cancelled/failed）")
+
+    params = task.params or {}
+    model_id = task.model_id
+    prompt = task.prompt
+    resolution = params.get("resolution", "1280x720")
+    duration = params.get("duration", 5)
+    reference_images = params.get("reference_images") or None
+    reference_audio = params.get("reference_audio") or None
+    reference_mode = params.get("reference_mode")
+
+    from app.services.providers import resolve_provider
+    provider = resolve_provider(model_id)
+
+    new_task = create_task(
+        provider=provider,
+        model_id=model_id,
+        prompt=prompt,
+        params={
+            "duration": duration,
+            "resolution": resolution,
+            "camera": params.get("camera", ""),
+            "reference_mode": reference_mode,
+            "reference_images": reference_images,
+            "reference_audio": reference_audio,
+        },
+    )
+    try:
+        await _save_task(new_task)
+    except Exception:
+        pass
+
+    creation = Creation(
+        user_id=uuid.UUID(current_user.id),
+        type=CreationType.VIDEO,
+        title=prompt[:100] or "视频生成(重跑)",
+        prompt=prompt,
+        status=CreationStatus.PROCESSING,
+        params={
+            "task_id": new_task.task_id,
+            "model_id": model_id,
+            "duration": duration,
+            "resolution": resolution,
+            "retry_of": task_id,
+        },
+    )
+    db.add(creation)
+    await db.flush()
+
+    _dispatch_video(new_task.task_id, {
+        "task_id": new_task.task_id,
+        "model_id": model_id,
+        "prompt": prompt,
+        "duration": duration,
+        "resolution": resolution,
+        "camera": params.get("camera", ""),
+        "reference_mode": reference_mode,
+        "reference_images": reference_images,
+        "reference_audio": reference_audio,
+    })
+
+    return TaskStatusResponse(
+        task_id=new_task.task_id,
+        status=new_task.status,
+        progress=new_task.progress,
+        creation_id=str(creation.id) if creation.id else None,
+    )
 
 
 @router.get("/status/{task_id}", response_model=TaskStatusResponse)
@@ -247,7 +277,6 @@ async def get_video_generation_status(task_id: str):
         r = get_async_redis(db=1)
         raw = await r.get(f"spiritlens:result:{task_id}")
         if raw:
-            import json
             res = json.loads(raw)
             await r.close()
             if res.get("error"):
@@ -285,3 +314,60 @@ async def get_video_generation_status(task_id: str):
         )
 
     raise HTTPException(status_code=404, detail="Task not found")
+
+
+@router.get("/download")
+async def download_video(url: str = Query(...), request: Request = None):
+    """流式代理下载视频（同源化，使浏览器 `<a download>` 生效）。
+
+    视频存于跨域 CDN（media.yhanm.cn），`<a download>` 跨域时浏览器会忽略
+    download 属性直接打开视频。此端点把 CDN URL 转成同源请求，流式转发 +
+    Range 透传——响应头一到浏览器即弹出下载栏。
+
+    仅允许转发本站媒体域名（OSS_PUBLIC_URL / PUBLIC_URL），防止 SSRF。
+    """
+    try:
+        from app.core.config import get_settings as _gs
+        _cfg = _gs()
+        allowed = [
+            p.rstrip("/") + "/"
+            for p in (_cfg.OSS_PUBLIC_URL, _cfg.PUBLIC_URL)
+            if p
+        ]
+    except Exception:
+        allowed = ["https://media.yhanm.cn/"]
+    if not any(url.startswith(p) for p in allowed):
+        raise HTTPException(status_code=400, detail="仅支持本站媒体链接下载")
+
+    import httpx
+    headers = {}
+    if request and request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+
+    client = httpx.AsyncClient(follow_redirects=True, timeout=300.0)
+    req = client.build_request("GET", url, headers=headers)
+    resp = await client.send(req, stream=True)
+    if resp.status_code >= 400:
+        await resp.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=502, detail="视频获取失败")
+
+    resp_headers = {}
+    for h in ("content-length", "content-range", "accept-ranges"):
+        if resp.headers.get(h):
+            resp_headers[h.title()] = resp.headers[h]
+
+    async def _iter():
+        try:
+            async for chunk in resp.aiter_bytes():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _iter(),
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "video/mp4"),
+        headers=resp_headers,
+    )

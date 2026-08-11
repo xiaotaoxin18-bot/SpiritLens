@@ -11,7 +11,7 @@ router = APIRouter(prefix="/enhance", tags=["enhance"])
 
 
 class EnhanceRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, max_length=2000)
+    prompt: str = Field(..., min_length=1)
 
 
 class EnhanceResponse(BaseModel):

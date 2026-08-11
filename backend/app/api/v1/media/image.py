@@ -40,6 +40,11 @@ async def create_image_generation(
     Returns immediately with a task_id. Poll GET /status/{task_id}
     to check completion.
     """
+    # 防自动化批量提交：同用户 60 秒内 > 10 次 → 429
+    from app.services.redis_helper import check_generate_rate
+    if not await check_generate_rate(str(current_user.id), "image"):
+        raise HTTPException(status_code=429, detail="提交过于频繁，请稍后再试")
+
     # Create task record (stored in Redis via generation.py)
     result = await create_redis_task(
         prompt=req.prompt,
@@ -68,24 +73,41 @@ async def create_image_generation(
             "batch": req.batch,
             "style": req.style,
             "reference_dimension": req.reference_dimension,
+            "source": req.source,  # ai-tool / project —— AI 工具页历史恢复时排除 project
         },
     )
     db.add(creation)
     await db.flush()
 
     # Dispatch to Celery worker in background
-    celery_generate_image.delay(
-        prompt=req.prompt,
-        model_id=req.model_id,
-        task_id=result["task_id"],
-        size=req.size,
-        batch=req.batch,
-        negative_prompt=req.negative_prompt,
-        seed=req.seed,
-        reference_images=req.reference_images or None,
-        reference_strength=req.reference_strength,
-        reference_dimension=req.reference_dimension,
-    )
+    try:
+        celery_generate_image.apply_async(
+            task_id=result["task_id"],  # Celery id == SpiritLens task id → revoke() works
+            kwargs={
+                "prompt": req.prompt,
+                "model_id": req.model_id,
+                "task_id": result["task_id"],
+                "size": req.size,
+                "batch": req.batch,
+                "negative_prompt": req.negative_prompt,
+                "seed": req.seed,
+                "reference_images": req.reference_images or None,
+                "reference_strength": req.reference_strength,
+                "reference_dimension": req.reference_dimension,
+            },
+        )
+    except Exception as exc:
+        logger.exception("Failed to dispatch image task: %s", result["task_id"])
+        try:
+            from app.services.redis_helper import get_redis
+            r = get_redis(db=1)
+            r.hset(f"spiritlens:task:{result['task_id']}", mapping={
+                "status": "failed", "error_message": f"任务提交失败: {exc}"[:500],
+            })
+            r.close()
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="生成任务提交失败，请稍后重试")
 
     return TaskStatusResponse(
         task_id=result["task_id"],
@@ -108,6 +130,16 @@ async def get_generation_status(task_id: str):
             import json
             res = json.loads(raw)
             await r.close()
+            if res.get("error"):
+                return TaskStatusResponse(
+                    task_id=task_id, status=res.get("status") or "failed",
+                    progress=0, error_message=res.get("error"),
+                )
+            if res.get("status") == "cancelled":
+                return TaskStatusResponse(
+                    task_id=task_id, status="cancelled", progress=0,
+                    error_message="Task cancelled by user",
+                )
             return TaskStatusResponse(
                 task_id=task_id, status="completed", progress=100,
                 image_urls=res.get("image_urls", []),

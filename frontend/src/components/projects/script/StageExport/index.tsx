@@ -8,6 +8,8 @@ import {
 } from "lucide-react";
 import { cn, resolveImageUrl } from "@/lib/utils";
 import { api } from "@/services/api";
+import { downloadMedia } from "@/lib/download";
+import { useToast } from "@/components/ui/Toast";
 
 interface Props {
   projectId: string;
@@ -24,6 +26,13 @@ interface ExportItem {
   status: "completed" | "pending" | "failed";
   duration: number;
   videoPrompt: string;
+  videoIndex?: number; // 镜头内视频序号（多视频：镜头1（1）/镜头1（2））
+}
+
+/** 导出项显示名：镜头{序号}（{视频序号}） */
+function itemLabel(item: ExportItem): string {
+  const idx = item.videoIndex && item.videoIndex > 1 ? `（${item.videoIndex}）` : "";
+  return `镜头${item.sequence}${idx}`;
 }
 
 interface ExportData {
@@ -42,6 +51,7 @@ const STATUS_CONFIG = {
 } as const;
 
 export default function StageExport({ projectId, episodeId }: Props) {
+  const { toast } = useToast();
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [items, setItems] = useState<ExportItem[]>([]);
   const [aspectRatio, setAspectRatio] = useState("16:9");
@@ -49,6 +59,8 @@ export default function StageExport({ projectId, episodeId }: Props) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [savingOrder, setSavingOrder] = useState(false);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
@@ -146,17 +158,32 @@ export default function StageExport({ projectId, episodeId }: Props) {
     setDragIdx(null);
   };
 
-  const handleDownload = (url: string, label: string) => {
-    const a = document.createElement("a");
-    a.href = resolveImageUrl(url);
-    a.download = `${label}.mp4`;
-    a.click();
+  const handleDownload = async (url: string, label: string, id: string) => {
+    if (downloadingId) return;
+    setDownloadingId(id);
+    try {
+      // 跨域 CDN 直链 download 会被浏览器忽略，走 fetch blob / 代理
+      await downloadMedia(resolveImageUrl(url), `${label}.mp4`, { isVideo: true });
+    } catch (e: any) {
+      toast(e?.message || "下载失败", "error");
+    } finally {
+      setDownloadingId(null);
+    }
   };
 
-  const handleDownloadAll = () => {
-    completedItems.forEach((item, idx) => {
-      setTimeout(() => handleDownload(item.videoUrl, `shot-${item.sequence}`), idx * 500);
-    });
+  const handleDownloadAll = async () => {
+    if (downloadingAll) return;
+    setDownloadingAll(true);
+    try {
+      for (const item of completedItems) {
+        await downloadMedia(resolveImageUrl(item.videoUrl), `${itemLabel(item)}.mp4`, { isVideo: true });
+      }
+      toast("已开始下载全部视频", "success");
+    } catch (e: any) {
+      toast(e?.message || "下载失败", "error");
+    } finally {
+      setDownloadingAll(false);
+    }
   };
 
   const goToItem = (idx: number) => {
@@ -228,10 +255,11 @@ export default function StageExport({ projectId, episodeId }: Props) {
           {completedCount > 0 && (
             <>
               <button onClick={handleDownloadAll}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-brand-cyan/10 text-brand-cyan hover:bg-brand-cyan/20 border border-brand-cyan/20 transition-all"
+                disabled={downloadingAll}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-brand-cyan/10 text-brand-cyan hover:bg-brand-cyan/20 border border-brand-cyan/20 transition-all disabled:opacity-50"
               >
-                <Download className="size-3.5" />
-                全部下载
+                {downloadingAll ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                {downloadingAll ? "下载中…" : "全部下载"}
               </button>
             </>
           )}
@@ -241,10 +269,10 @@ export default function StageExport({ projectId, episodeId }: Props) {
 
       {/* ── Body: Player + Playlist ──────────────────────── */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Player */}
-        <div ref={playerRef} className="flex-1 flex flex-col items-center justify-center p-6 bg-black/40 min-w-0">
+        {/* Player — fill available space */}
+        <div ref={playerRef} className="flex-1 flex flex-col bg-black/40 min-w-0 relative">
           {currentItem && currentItem.status === "completed" ? (
-            <div className="w-full max-w-3xl space-y-4">
+            <div className="absolute inset-0">
               <video
                 key={currentItem.id}
                 ref={videoRef}
@@ -253,21 +281,22 @@ export default function StageExport({ projectId, episodeId }: Props) {
                 onPlay={() => setIsPlaying(true)}
                 onPause={() => setIsPlaying(false)}
                 controls
-                className="w-full rounded-xl bg-black max-h-[60vh]"
+                className="w-full h-full bg-black"
                 autoPlay={isPlaying}
               />
-              {/* Progress indicator */}
-              <div className="flex items-center justify-between text-xs">
+              {/* Progress indicator — overlay at bottom */}
+              <div className="absolute bottom-0 left-0 right-0 flex items-center justify-between text-xs px-4 py-2 bg-gradient-to-t from-black/80 to-transparent pointer-events-none">
                 <span className="text-text-muted font-mono">
-                  #{String(currentItem.sequence).padStart(2, "0")} · {currentItem.actionSummary || "未命名镜头"}
+                  {itemLabel(currentItem)} · {currentItem.actionSummary || "未命名镜头"}
                 </span>
                 <div className="flex items-center gap-2">
                   <span className="text-text-muted">{currentItem.duration} 秒</span>
-                  <button onClick={() => handleDownload(currentItem.videoUrl, `shot-${currentItem.sequence}`)}
-                    className="p-1.5 rounded-lg text-text-muted hover:text-brand-cyan transition-colors"
+                  <button onClick={() => handleDownload(currentItem.videoUrl, itemLabel(currentItem), currentItem.id)}
+                    disabled={downloadingId === currentItem.id}
+                    className="pointer-events-auto p-1.5 rounded-lg text-text-muted hover:text-brand-cyan transition-colors disabled:opacity-50"
                     title="下载当前视频"
                   >
-                    <Download className="size-3.5" />
+                    {downloadingId === currentItem.id ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
                   </button>
                 </div>
               </div>
@@ -326,10 +355,10 @@ export default function StageExport({ projectId, episodeId }: Props) {
 
                   {/* Sequence */}
                   <span className={cn(
-                    "text-[10px] font-bold font-mono w-6 shrink-0",
+                    "text-[10px] font-bold font-mono shrink-0",
                     isActive ? "text-brand-cyan" : "text-text-muted"
                   )}>
-                    #{String(item.sequence).padStart(2, "0")}
+                    {itemLabel(item)}
                   </span>
 
                   {/* Summary */}

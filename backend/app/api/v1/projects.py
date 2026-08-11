@@ -1,13 +1,15 @@
 """Project management API routes."""
 
+import logging
 import uuid
+from datetime import timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import joinedload
 from app.core.database import get_db
 from app.schemas.auth import UserOut
-from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectOut, ProjectList
+from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectOut, ProjectList, AddMemberRequest
 from app.schemas import episode as schemas_episode
 from app.schemas import character as schemas_character
 from app.schemas import scene as schemas_scene
@@ -16,7 +18,10 @@ from app.schemas import storyboard as schemas_storyboard
 from app.schemas import season as schemas_season
 from app.api.v1.auth import get_current_user
 from app.models.project import Project, ProjectStatus
+from app.models.project_member import ProjectMember, ProjectMemberRole
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -30,10 +35,12 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
     current_user: UserOut = Depends(get_current_user),
 ):
-    """List projects for the current user."""
+    """List projects for the current user (owned + shared)."""
     uid = uuid.UUID(current_user.id)
-    query = select(Project).where(Project.user_id == uid)
-    count_query = select(func.count()).select_from(Project).where(Project.user_id == uid)
+    # Find project IDs where user is a member
+    member_pids = select(ProjectMember.project_id).where(ProjectMember.user_id == uid)
+    query = select(Project).where(Project.id.in_(member_pids))
+    count_query = select(func.count()).select_from(Project).where(Project.id.in_(member_pids))
 
     if q:
         like = f"%{q}%"
@@ -94,6 +101,13 @@ async def create_project(
     await db.flush()
     await db.refresh(project)
 
+    # Auto-add creator as project owner member
+    db.add(ProjectMember(
+        project_id=project.id,
+        user_id=uuid.UUID(current_user.id),
+        role=ProjectMemberRole.OWNER,
+    ))
+
     return ProjectOut(
         id=str(project.id),
         name=project.name,
@@ -121,7 +135,10 @@ async def get_project(
 
     uid = uuid.UUID(current_user.id)
     result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
+        select(Project).where(
+            Project.id == pid,
+            Project.id.in_(select(ProjectMember.project_id).where(ProjectMember.user_id == uid))
+        )
     )
     project = result.scalar_one_or_none()
     if not project:
@@ -154,9 +171,8 @@ async def update_project(
         raise HTTPException(status_code=400, detail="Invalid project ID")
 
     uid = uuid.UUID(current_user.id)
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
+    await _require_project_owner(pid, uid, db)
+    result = await db.execute(select(Project).where(Project.id == pid))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -204,15 +220,200 @@ async def delete_project(
         raise HTTPException(status_code=400, detail="Invalid project ID")
 
     uid = uuid.UUID(current_user.id)
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
+    await _require_project_owner(pid, uid, db)
+    result = await db.execute(select(Project).where(Project.id == pid))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # 连根清理媒体文件（DB 行由 FK 级联删除，这里补删 COS 对象/本地文件）
+    from app.models.character import Character
+    from app.models.scene import Scene
+    from app.models.prop import Prop
+    from app.models.episode import Episode
+    from app.models.storyboard import Storyboard
+    from app.services.file_storage import delete_media, collect_media_urls
+
+    media_urls: set[str] = set()
+    for model in (Character, Scene, Prop):
+        rows = await db.execute(select(model.image_url).where(model.project_id == pid))
+        media_urls.update(r[0] for r in rows if r[0])
+    eps = await db.execute(
+        select(Episode.cover_url, Episode.config).where(Episode.project_id == pid)
+    )
+    for cover, cfg in eps:
+        if cover:
+            media_urls.add(cover)
+        if isinstance(cfg, dict):
+            media_urls |= collect_media_urls(cfg)
+    boards = await db.execute(
+        select(
+            Storyboard.generated_scene_image_url,
+            Storyboard.generated_character_image_url,
+            Storyboard.generated_video_url,
+        ).where(Storyboard.episode_id.in_(
+            select(Episode.id).where(Episode.project_id == pid)
+        ))
+    )
+    for r in boards:
+        media_urls.update(x for x in r if x)
+
+    deleted = 0
+    failed = 0
+    for url in media_urls:
+        try:
+            if await delete_media(url):
+                deleted += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    logger.info("Project %s media cleanup: %d files deleted, %d failed", project_id, deleted, failed)
+
     await db.delete(project)
     return None
+
+
+# ── Members (成员管理) ──────────────────────────────────────────
+
+
+@router.get("/{project_id}/members")
+async def list_project_members(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """List all members of a project."""
+    pid = _resolve_project_id(project_id)
+    uid = uuid.UUID(current_user.id)
+    await _verify_project_member(pid, uid, db)
+
+    result = await db.execute(
+        select(ProjectMember, User.nickname, User.username)
+        .join(User, ProjectMember.user_id == User.id)
+        .where(ProjectMember.project_id == pid)
+        .order_by(ProjectMember.created_at.asc())
+    )
+    rows = result.all()
+    return [
+        {
+            "user_id": str(row.ProjectMember.user_id),
+            "role": row.ProjectMember.role.value,
+            "nickname": row.nickname,
+            "username": row.username,
+            "created_at": row.ProjectMember.created_at,
+        }
+        for row in rows
+    ]
+
+
+@router.post("/{project_id}/members", status_code=201)
+async def add_project_member(
+    project_id: str,
+    data: AddMemberRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """Add a member to a project. Owner only."""
+    pid = _resolve_project_id(project_id)
+    uid = uuid.UUID(current_user.id)
+    await _require_project_owner(pid, uid, db)
+
+    target_user_id = uuid.UUID(data.user_id)
+    role = data.role
+
+    if role not in ("editor", "viewer"):
+        raise HTTPException(status_code=400, detail="无效角色，仅支持 editor/viewer")
+
+    # Check user exists
+    result = await db.execute(select(User).where(User.id == target_user_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    # Check not already a member
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == pid,
+            ProjectMember.user_id == target_user_id,
+        )
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="该用户已是项目成员")
+
+    member = ProjectMember(
+        project_id=pid,
+        user_id=target_user_id,
+        role=ProjectMemberRole(role),
+    )
+    db.add(member)
+    await db.flush()
+    return {"status": "ok", "user_id": str(target_user_id), "role": role}
+
+
+@router.delete("/{project_id}/members/{member_id}", status_code=204)
+async def remove_project_member(
+    project_id: str,
+    member_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """Remove a member from a project. Owner only."""
+    pid = _resolve_project_id(project_id)
+    uid = uuid.UUID(current_user.id)
+    await _require_project_owner(pid, uid, db)
+
+    target_id = uuid.UUID(member_id)
+
+    # Cannot remove self (owner)
+    if target_id == uid:
+        raise HTTPException(status_code=400, detail="不能移除自己")
+
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == pid,
+            ProjectMember.user_id == target_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="成员不存在")
+
+    # Cannot remove the owner
+    if member.role == ProjectMemberRole.OWNER:
+        raise HTTPException(status_code=400, detail="不能移除项目所有者")
+
+    await db.delete(member)
+    return None
+
+
+@router.get("/{project_id}/available-users")
+async def list_available_users(
+    project_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """List all users who can be invited to this project (not already members)."""
+    pid = _resolve_project_id(project_id)
+    uid = uuid.UUID(current_user.id)
+    await _verify_project_member(pid, uid, db)
+
+    # Exclude existing members + current user
+    existing = select(ProjectMember.user_id).where(ProjectMember.project_id == pid)
+    result = await db.execute(
+        select(User).where(User.id.notin_(existing)).order_by(User.nickname)
+    )
+    users = result.scalars().all()
+    return {
+        "users": [
+            {
+                "user_id": str(u.id),
+                "nickname": u.nickname or u.username,
+                "username": u.username,
+            }
+            for u in users
+            if str(u.id) != current_user.id
+        ]
+    }
 
 
 # ── Episodes (集数) ─────────────────────────────────────────────
@@ -230,12 +431,8 @@ async def list_episodes(
     pid = _resolve_project_id(project_id)
     uid = uuid.UUID(current_user.id)
 
-    # Verify ownership
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Verify membership
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Episode)
@@ -253,6 +450,7 @@ async def list_episodes(
             episode_number=e.episode_number,
             title=e.title,
             status=e.status.value,
+            assignee_id=str(e.assignee_id) if e.assignee_id else None,
             script_content=e.script_content,
             config=e.config,
             created_at=e.created_at,
@@ -274,24 +472,22 @@ async def create_episode(
     pid = _resolve_project_id(project_id)
     uid = uuid.UUID(current_user.id)
 
-    # Verify ownership
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Project not found")
+    # Verify membership
+    await _verify_project_member(pid, uid, db)
 
-    # Check for duplicate episode number
+    # Check for duplicate episode number within the same season
+    filters = [Episode.project_id == pid, Episode.episode_number == data.episode_number]
+    if data.season_id:
+        filters.append(Episode.season_id == uuid.UUID(data.season_id))
+    else:
+        filters.append(Episode.season_id.is_(None))
     result = await db.execute(
-        select(Episode).where(
-            Episode.project_id == pid,
-            Episode.episode_number == data.episode_number,
-        )
+        select(Episode).where(*filters)
     )
     if result.scalar_one_or_none():
         raise HTTPException(
             status_code=409,
-            detail=f"Episode {data.episode_number} already exists",
+            detail=f"Episode {data.episode_number} already exists in this season",
         )
 
     episode = Episode(
@@ -301,6 +497,7 @@ async def create_episode(
         script_content=data.script_content,
         cover_url=data.cover_url,
         season_id=uuid.UUID(data.season_id) if data.season_id else None,
+        assignee_id=uuid.UUID(data.assignee_id) if data.assignee_id else None,
     )
     db.add(episode)
     await db.flush()
@@ -312,6 +509,7 @@ async def create_episode(
         episode_number=episode.episode_number,
         title=episode.title,
         status=episode.status.value,
+        assignee_id=str(episode.assignee_id) if episode.assignee_id else None,
         script_content=episode.script_content,
         config=episode.config,
         cover_url=episode.cover_url,
@@ -335,12 +533,7 @@ async def update_episode(
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
 
-    # Verify project ownership
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Project not found")
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Episode).where(Episode.id == eid, Episode.project_id == pid)
@@ -348,6 +541,17 @@ async def update_episode(
     episode = result.scalar_one_or_none()
     if not episode:
         raise HTTPException(status_code=404, detail="Episode not found")
+
+    # 乐观锁：客户端基于旧版本更新时返回 409（前端重拉合并重试）
+    if data.if_updated_before is not None:
+        ref = data.if_updated_before
+        if ref.tzinfo is not None:
+            ref = ref.astimezone(timezone.utc).replace(tzinfo=None)
+        if episode.updated_at and episode.updated_at > ref:
+            raise HTTPException(
+                status_code=409,
+                detail="配置已被其他用户更新，请重试",
+            )
 
     if data.title is not None:
         episode.title = data.title
@@ -364,6 +568,8 @@ async def update_episode(
         episode.config = data.config
     if data.season_id is not None:
         episode.season_id = uuid.UUID(data.season_id)
+    if data.assignee_id is not None:
+        episode.assignee_id = uuid.UUID(data.assignee_id) if data.assignee_id else None
 
     await db.flush()
     await db.refresh(episode)
@@ -374,6 +580,7 @@ async def update_episode(
         episode_number=episode.episode_number,
         title=episode.title,
         status=episode.status.value,
+        assignee_id=str(episode.assignee_id) if episode.assignee_id else None,
         script_content=episode.script_content,
         config=episode.config,
         created_at=episode.created_at,
@@ -395,11 +602,7 @@ async def delete_episode(
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
 
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Project not found")
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Episode).where(Episode.id == eid, Episode.project_id == pid)
@@ -426,12 +629,7 @@ async def get_episode(
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
 
-    # Verify ownership
-    result = await db.execute(
-        select(Project).where(Project.id == pid, Project.user_id == uid)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Project not found")
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Episode).where(Episode.id == eid, Episode.project_id == pid)
@@ -446,6 +644,7 @@ async def get_episode(
         episode_number=episode.episode_number,
         title=episode.title,
         status=episode.status.value,
+        assignee_id=str(episode.assignee_id) if episode.assignee_id else None,
         script_content=episode.script_content,
         config=episode.config,
         cover_url=episode.cover_url,
@@ -468,7 +667,7 @@ async def list_seasons(
 
     pid = _resolve_project_id(project_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Season)
@@ -495,7 +694,7 @@ async def create_season(
 
     pid = _resolve_project_id(project_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     season = Season(
         project_id=pid,
@@ -522,7 +721,7 @@ async def update_season(
     pid = _resolve_project_id(project_id)
     sid = uuid.UUID(season_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Season).where(Season.id == sid, Season.project_id == pid)
@@ -554,7 +753,7 @@ async def delete_season(
     pid = _resolve_project_id(project_id)
     sid = uuid.UUID(season_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Season).where(Season.id == sid, Season.project_id == pid)
@@ -583,7 +782,7 @@ async def import_novel(
 
     pid = _resolve_project_id(project_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     try:
         items = await split_novel_into_episodes(data.content)
@@ -649,7 +848,7 @@ async def list_storyboards(
     pid = _resolve_project_id(project_id)
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Storyboard)
@@ -678,7 +877,7 @@ async def create_storyboard(
     pid = _resolve_project_id(project_id)
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     sb = Storyboard(
         episode_id=eid,
@@ -711,7 +910,7 @@ async def update_storyboard(
     pid = _resolve_project_id(project_id)
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Storyboard).where(Storyboard.id == uuid.UUID(storyboard_id), Storyboard.episode_id == eid)
@@ -760,7 +959,7 @@ async def delete_storyboard(
     pid = _resolve_project_id(project_id)
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     result = await db.execute(
         select(Storyboard).where(Storyboard.id == uuid.UUID(storyboard_id), Storyboard.episode_id == eid)
@@ -791,7 +990,7 @@ async def ai_breakdown_script(
     pid = _resolve_project_id(project_id)
     eid = _resolve_episode_id(episode_id)
     uid = uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
 
     # Get episode with script
     result = await db.execute(
@@ -843,13 +1042,29 @@ async def ai_breakdown_script(
 # ── Project Asset CRUD helpers ──────────────────────────────────
 
 
-async def _verify_project_owner(project_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession):
-    """Ensure current user owns the project. Raises 404 if not."""
+async def _verify_project_member(project_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession):
+    """Ensure current user is a project member. Raises 404 if not."""
     result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.user_id == user_id)
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+        )
     )
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Project not found")
+
+
+async def _require_project_owner(project_id: uuid.UUID, user_id: uuid.UUID, db: AsyncSession):
+    """Ensure current user is the project owner. Raises 403 if not."""
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+            ProjectMember.role == ProjectMemberRole.OWNER,
+        )
+    )
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=403, detail="只有项目所有者才能执行此操作")
 
 
 def _asset_out(entity) -> dict:
@@ -858,6 +1073,7 @@ def _asset_out(entity) -> dict:
         name=entity.name, description=entity.description,
         image_url=entity.image_url,
         prompt=getattr(entity, 'prompt', None),
+        group_id=str(entity.group_id) if entity.group_id else None,
         created_at=entity.created_at, updated_at=entity.updated_at,
     )
 
@@ -873,7 +1089,7 @@ async def list_characters(
 ):
     from app.models.character import Character
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
     result = await db.execute(
         select(Character).where(Character.project_id == pid).order_by(Character.created_at.desc())
     )
@@ -890,8 +1106,12 @@ async def create_character(
 ):
     from app.models.character import Character
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
-    entity = Character(project_id=pid, name=data.name, description=data.description, image_url=data.image_url)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
+    entity = Character(
+        project_id=pid, name=data.name, description=data.description,
+        image_url=data.image_url,
+        group_id=uuid.UUID(data.group_id) if data.group_id else None,
+    )
     db.add(entity)
     await db.flush()
     await db.refresh(entity)
@@ -907,7 +1127,7 @@ async def update_character(
 ):
     from app.models.character import Character
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Character).where(Character.id == eid, Character.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:
@@ -915,6 +1135,8 @@ async def update_character(
     if data.name is not None: entity.name = data.name
     if data.description is not None: entity.description = data.description
     if data.image_url is not None: entity.image_url = data.image_url
+    if data.group_id is not None:
+        entity.group_id = uuid.UUID(data.group_id) if data.group_id else None
     await db.flush()
     await db.refresh(entity)
     return _asset_out(entity)
@@ -928,7 +1150,7 @@ async def delete_character(
 ):
     from app.models.character import Character
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Character).where(Character.id == eid, Character.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:
@@ -948,7 +1170,7 @@ async def list_scenes(
 ):
     from app.models.scene import Scene
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
     result = await db.execute(
         select(Scene).where(Scene.project_id == pid).order_by(Scene.created_at.desc())
     )
@@ -965,8 +1187,12 @@ async def create_scene(
 ):
     from app.models.scene import Scene
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
-    entity = Scene(project_id=pid, name=data.name, description=data.description, image_url=data.image_url)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
+    entity = Scene(
+        project_id=pid, name=data.name, description=data.description,
+        image_url=data.image_url,
+        group_id=uuid.UUID(data.group_id) if data.group_id else None,
+    )
     db.add(entity)
     await db.flush()
     await db.refresh(entity)
@@ -982,7 +1208,7 @@ async def update_scene(
 ):
     from app.models.scene import Scene
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Scene).where(Scene.id == eid, Scene.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:
@@ -990,6 +1216,8 @@ async def update_scene(
     if data.name is not None: entity.name = data.name
     if data.description is not None: entity.description = data.description
     if data.image_url is not None: entity.image_url = data.image_url
+    if data.group_id is not None:
+        entity.group_id = uuid.UUID(data.group_id) if data.group_id else None
     await db.flush()
     await db.refresh(entity)
     return _asset_out(entity)
@@ -1003,7 +1231,7 @@ async def delete_scene(
 ):
     from app.models.scene import Scene
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Scene).where(Scene.id == eid, Scene.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:
@@ -1023,7 +1251,7 @@ async def list_props(
 ):
     from app.models.prop import Prop
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
     result = await db.execute(
         select(Prop).where(Prop.project_id == pid).order_by(Prop.created_at.desc())
     )
@@ -1040,8 +1268,12 @@ async def create_prop(
 ):
     from app.models.prop import Prop
     pid = _resolve_project_id(project_id)
-    await _verify_project_owner(pid, uuid.UUID(current_user.id), db)
-    entity = Prop(project_id=pid, name=data.name, description=data.description, image_url=data.image_url)
+    await _verify_project_member(pid, uuid.UUID(current_user.id), db)
+    entity = Prop(
+        project_id=pid, name=data.name, description=data.description,
+        image_url=data.image_url,
+        group_id=uuid.UUID(data.group_id) if data.group_id else None,
+    )
     db.add(entity)
     await db.flush()
     await db.refresh(entity)
@@ -1057,7 +1289,7 @@ async def update_prop(
 ):
     from app.models.prop import Prop
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Prop).where(Prop.id == eid, Prop.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:
@@ -1065,6 +1297,8 @@ async def update_prop(
     if data.name is not None: entity.name = data.name
     if data.description is not None: entity.description = data.description
     if data.image_url is not None: entity.image_url = data.image_url
+    if data.group_id is not None:
+        entity.group_id = uuid.UUID(data.group_id) if data.group_id else None
     await db.flush()
     await db.refresh(entity)
     return _asset_out(entity)
@@ -1078,7 +1312,7 @@ async def delete_prop(
 ):
     from app.models.prop import Prop
     pid, eid, uid = _resolve_project_id(project_id), uuid.UUID(entity_id), uuid.UUID(current_user.id)
-    await _verify_project_owner(pid, uid, db)
+    await _verify_project_member(pid, uid, db)
     result = await db.execute(select(Prop).where(Prop.id == eid, Prop.project_id == pid))
     entity = result.scalar_one_or_none()
     if not entity:

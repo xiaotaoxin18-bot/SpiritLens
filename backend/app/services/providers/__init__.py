@@ -10,14 +10,20 @@ logger = logging.getLogger(__name__)
 # Provider capabilities: which models map to which provider implementation.
 # Image and video generation is routed through Xinghe Zhiyun's unified gateway.
 PROVIDER_MAP: dict[str, str] = {
+    # 星河智云
     "doubao-seedream-4-5-251128": "xinghe",
     "doubao-seedream-5-0-260128": "xinghe",
     "doubao-seedance-2-0-260128": "xinghe",
     "doubao-seedance-2-0-fast-260128": "xinghe",
+    # 天翼云边缘AI网关
+    "tianyi-cdance2.0": "tianyi",
 }
 
 # Canonical model ID mapping (internal → API)
-MODEL_ID_MAP: dict[str, str] = {}
+MODEL_ID_MAP: dict[str, str] = {
+    # 天翼云视频模型
+    "tianyi-cdance2.0": "cdance2.0-0611",
+}
 
 
 def get_api_model_id(model_id: str) -> str:
@@ -37,6 +43,13 @@ PROVIDER_META: dict[str, dict] = {
             {"id": "doubao-seedance-2-0-fast-260128", "name": "Seedance 2.0 Fast", "type": "video"},
         ],
     },
+    "tianyi": {
+        "name": "天翼云",
+        "capabilities": ["video"],
+        "models": [
+            {"id": "tianyi-cdance2.0", "name": "Seedance 2.0 (天翼云)", "type": "video"},
+        ],
+    },
 }
 
 
@@ -45,7 +58,9 @@ def resolve_provider(model_id: str) -> str:
     # Try direct lookup
     if model_id in PROVIDER_MAP:
         return PROVIDER_MAP[model_id]
-    # Try prefix match
+    # Try prefix match (tianyi- must come before doubao- to avoid ambiguity)
+    if model_id.startswith("tianyi-"):
+        return "tianyi"
     if model_id.startswith("doubao-"):
         return "xinghe"
     return "unknown"

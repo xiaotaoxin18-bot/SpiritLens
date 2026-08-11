@@ -18,8 +18,8 @@ async def upload_images(files: list[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="没有上传文件")
 
-    if len(files) > 9:
-        raise HTTPException(status_code=400, detail="一次最多上传 9 张图片")
+    if len(files) > 15:
+        raise HTTPException(status_code=400, detail="一次最多上传 15 张图片")
 
     urls: list[str] = []
     errors: list[dict] = []

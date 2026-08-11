@@ -13,7 +13,7 @@ from app.core.database import get_db
 from app.models.episode import Episode
 from app.models.user import User
 from app.api.v1.auth import get_current_user
-from app.api.v1.projects import _verify_project_owner
+from app.api.v1.projects import _verify_project_member
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class ExportItem(BaseModel):
     status: str = "pending"  # completed | pending | failed
     duration: int = 5
     videoPrompt: str = ""
+    videoIndex: int = 1  # 镜头内第几个视频（多视频：镜头1（1）/镜头1（2））
 
 
 class ExportListResponse(BaseModel):
@@ -70,29 +71,38 @@ def _parse_shots(episode, config: dict) -> tuple[list[dict], str]:
     return shots, aspect_ratio, episode_title
 
 
-def _shot_to_export_item(shot: dict, idx: int) -> ExportItem:
-    """Convert a shot dict to an ExportItem."""
+def _shot_videos(shot: dict, idx: int) -> list[ExportItem]:
+    """Convert a shot dict to one or more ExportItems (multi-video support).
+
+    videos 列表优先（一个镜头多个视频 → 镜头N（1）/镜头N（2）…）；
+    老数据（仅 interval）退化为单视频。
+    """
     shot_id = shot.get("id", f"shot-{idx + 1}")
     action = shot.get("actionSummary", shot.get("sceneDescription", ""))
     interval = shot.get("interval") or {}
-    video_url = interval.get("videoUrl") or ""
+    videos = shot.get("videos") or ([interval] if interval else [])
 
-    if video_url:
-        status = "completed"
-    elif interval.get("status") == "failed":
-        status = "failed"
-    else:
-        status = "pending"
+    items: list[ExportItem] = []
+    for vi, v in enumerate(videos):
+        video_url = v.get("videoUrl") or ""
+        if video_url:
+            status = "completed"
+        elif v.get("status") == "failed":
+            status = "failed"
+        else:
+            status = "pending"
 
-    return ExportItem(
-        id=shot_id,
-        sequence=idx + 1,
-        actionSummary=action,
-        videoUrl=video_url,
-        status=status,
-        duration=interval.get("duration", 5),
-        videoPrompt=interval.get("videoPrompt", ""),
-    )
+        items.append(ExportItem(
+            id=f"{shot_id}:v{vi + 1}",
+            sequence=idx + 1,
+            actionSummary=action,
+            videoUrl=video_url,
+            status=status,
+            duration=v.get("duration", 5),
+            videoPrompt=v.get("videoPrompt", ""),
+            videoIndex=vi + 1,
+        ))
+    return items
 
 
 # ─── Routes ─────────────────────────────────────────────────
@@ -110,7 +120,7 @@ async def get_export_videos(
     Reads from episode config (where StageDirector stores shot data).
     Returns ordered list of shots with their video status.
     """
-    await _verify_project_owner(project_id, current_user.id, db)
+    await _verify_project_member(project_id, current_user.id, db)
 
     result = await db.execute(
         select(Episode).where(
@@ -125,7 +135,7 @@ async def get_export_videos(
     config = episode.config or {}
     shots, aspect_ratio, episode_title = _parse_shots(episode, config)
 
-    items = [_shot_to_export_item(s, i) for i, s in enumerate(shots)]
+    items = [item for i, s in enumerate(shots) for item in _shot_videos(s, i)]
 
     return ExportListResponse(
         total=len(items),
@@ -144,7 +154,7 @@ async def save_export_order(
     current_user: User = Depends(get_current_user),
 ):
     """Save the export shot order to episode config (drag-reorder persistence)."""
-    await _verify_project_owner(project_id, current_user.id, db)
+    await _verify_project_member(project_id, current_user.id, db)
 
     result = await db.execute(
         select(Episode).where(
@@ -191,7 +201,7 @@ async def get_export_manifest(
 
     Frontend uses this to display progress and build download playlist.
     """
-    await _verify_project_owner(project_id, current_user.id, db)
+    await _verify_project_member(project_id, current_user.id, db)
 
     result = await db.execute(
         select(Episode).where(
@@ -210,25 +220,29 @@ async def get_export_manifest(
     pending: list[dict] = []
 
     for idx, shot in enumerate(shots):
-        interval = shot.get("interval") or {}
-        video_url = interval.get("videoUrl") or ""
         sid = shot.get("id", f"shot-{idx + 1}")
         action = shot.get("actionSummary", shot.get("sceneDescription", ""))
+        interval = shot.get("interval") or {}
+        videos = shot.get("videos") or ([interval] if interval else [])
 
-        if video_url:
-            completed.append({
-                "id": sid,
-                "sequence": idx + 1,
-                "actionSummary": action,
-                "videoUrl": video_url,
-                "duration": interval.get("duration", 5),
-            })
-        else:
-            pending.append({
-                "id": sid,
-                "sequence": idx + 1,
-                "actionSummary": action,
-            })
+        for vi, v in enumerate(videos):
+            video_url = v.get("videoUrl") or ""
+            if video_url:
+                completed.append({
+                    "id": f"{sid}:v{vi + 1}",
+                    "sequence": idx + 1,
+                    "videoIndex": vi + 1,
+                    "actionSummary": action,
+                    "videoUrl": video_url,
+                    "duration": v.get("duration", 5),
+                })
+            else:
+                pending.append({
+                    "id": f"{sid}:v{vi + 1}",
+                    "sequence": idx + 1,
+                    "videoIndex": vi + 1,
+                    "actionSummary": action,
+                })
 
     return ExportManifest(
         episodeTitle=episode_title,

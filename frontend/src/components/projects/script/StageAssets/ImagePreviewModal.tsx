@@ -2,6 +2,7 @@
 
 import { X, Download } from "lucide-react";
 import { resolveImageUrl } from "@/lib/utils";
+import { downloadMedia } from "@/lib/download";
 
 interface Props {
   url: string | null;
@@ -10,12 +11,7 @@ interface Props {
 
 function handleDownload(url: string) {
   const fullUrl = resolveImageUrl(url);
-  const a = document.createElement("a");
-  a.href = fullUrl;
-  a.download = url.split("/").pop() || "image.jpg";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  downloadMedia(fullUrl, url.split("/").pop() || "image.jpg");
 }
 
 export default function ImagePreviewModal({ url, onClose }: Props) {

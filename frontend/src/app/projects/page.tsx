@@ -5,12 +5,13 @@ import { useRouter } from "next/navigation";
 import {
   Plus, Folder, Trash2, Loader2, Search, AlertTriangle, X,
   HelpCircle, Cpu, Sun, Moon, Database, ChevronRight,
-  Film, Clock,
+  Film, Clock, Home,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 
 interface Project {
   id: string;
@@ -25,11 +26,14 @@ export default function ProjectsPage() {
   const router = useRouter();
   const { isAuthenticated } = useAuthStore();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { toast } = useToast();
   const [mounted, setMounted] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -71,24 +75,34 @@ export default function ProjectsPage() {
   }, [search]);
 
   const handleCreate = async () => {
+    if (isCreating) return;
+    setIsCreating(true);
     try {
       const res = await api.post<{ id: string }>("/api/v1/projects", {
         name: "未命名项目",
         aspect_ratio: "16:9",
       });
+      toast("项目创建成功", "success");
       router.push(`/projects/${res.id}`);
-    } catch {
-      // ignore
+    } catch (e: any) {
+      toast(e?.message || "创建失败", "error");
+    } finally {
+      setIsCreating(false);
     }
   };
 
   const confirmDelete = async (id: string) => {
+    if (deletingId) return;
+    setDeletingId(id);
     try {
       await api.delete(`/api/v1/projects/${id}`);
       setDeleteConfirmId(null);
+      toast("项目已删除", "success");
       loadProjects();
-    } catch {
-      // ignore
+    } catch (e: any) {
+      toast(e?.message || "删除失败", "error");
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -112,7 +126,7 @@ export default function ProjectsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface-base">
+    <div className="h-full overflow-y-auto bg-surface-base">
       <div className="max-w-6xl mx-auto px-6 py-8">
         {/* Header */}
         <header className="flex items-center justify-between mb-8">
@@ -128,11 +142,12 @@ export default function ProjectsPage() {
               <span className="font-medium text-xs tracking-widest uppercase">{theme === "dark" ? "亮色" : "暗色"}</span>
             </button>
             <button
-              onClick={handleCreate}
-              className="flex items-center gap-3 px-6 py-3 rounded-xl bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white hover:shadow-glow-md transition-all"
+              onClick={() => router.push("/")}
+              className="flex items-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white hover:shadow-glow-md transition-all"
+              title="返回首页"
             >
-              <Plus className="size-4" />
-              <span className="font-bold text-xs tracking-widest uppercase">新建项目</span>
+              <Home className="size-4" />
+              <span className="font-bold text-xs tracking-widest uppercase">返回首页</span>
             </button>
           </div>
         </header>
@@ -157,12 +172,19 @@ export default function ProjectsPage() {
             {/* Create New Card */}
             <div
               onClick={handleCreate}
-              className="group cursor-pointer rounded-2xl border border-border-subtle hover:border-border-glow bg-surface-card flex flex-col items-center justify-center min-h-[280px] transition-all"
+              className={cn(
+                "group cursor-pointer rounded-2xl border-2 border-dashed border-brand-cyan/30 hover:border-brand-cyan/60 bg-brand-cyan/[0.03] hover:bg-brand-cyan/[0.08] flex flex-col items-center justify-center min-h-[280px] transition-all",
+                isCreating && "opacity-60 pointer-events-none"
+              )}
             >
-              <div className="w-12 h-12 rounded-xl border border-border-subtle flex items-center justify-center mb-6 group-hover:bg-surface-light transition-colors">
-                <Plus className="size-5 text-text-muted group-hover:text-text-primary" />
+              <div className="w-12 h-12 rounded-xl border-2 border-dashed border-brand-cyan/30 group-hover:border-brand-cyan/60 flex items-center justify-center mb-6 transition-colors">
+                {isCreating ? (
+                  <Loader2 className="size-5 text-brand-cyan animate-spin" />
+                ) : (
+                  <Plus className="size-5 text-brand-cyan/60 group-hover:text-brand-cyan" />
+                )}
               </div>
-              <span className="text-text-muted font-mono text-[10px] uppercase tracking-widest group-hover:text-text-secondary">创建新项目</span>
+              <span className="text-brand-cyan/80 font-mono text-[10px] uppercase tracking-widest group-hover:text-brand-cyan">{isCreating ? "创建中…" : "创建新项目"}</span>
             </div>
 
             {/* Project Cards */}
@@ -193,9 +215,11 @@ export default function ProjectsPage() {
                       </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); confirmDelete(proj.id); }}
-                        className="flex-1 py-3 rounded-xl bg-red-500/10 text-red-400 text-[10px] font-bold uppercase tracking-wider transition-colors"
+                        disabled={deletingId === proj.id}
+                        className="flex-1 py-3 rounded-xl bg-red-500/10 text-red-400 text-[10px] font-bold uppercase tracking-wider transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
                       >
-                        永久删除
+                        {deletingId === proj.id ? <Loader2 className="size-3 animate-spin" /> : null}
+                        {deletingId === proj.id ? "删除中…" : "永久删除"}
                       </button>
                     </div>
                   </div>

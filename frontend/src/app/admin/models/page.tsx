@@ -25,6 +25,7 @@ import {
 import { useAuthStore } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 import { cn } from "@/lib/utils";
 
 interface ModelItem {
@@ -65,6 +66,7 @@ export default function AdminModelsPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuthStore();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { toast } = useToast();
   const [mounted, setMounted] = useState(false);
   const [models, setModels] = useState<ModelItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -77,6 +79,8 @@ export default function AdminModelsPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; detail: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ModelItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -146,19 +150,24 @@ export default function AdminModelsPage() {
       }
       setShowForm(false);
       fetchModels();
-    } catch {
-      // ignore
+      toast(editingId ? "模型已更新" : "模型已添加", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "保存失败", "error");
     } finally {
       setSaving(false);
     }
   };
 
   const handleToggle = async (m: ModelItem) => {
+    setTogglingId(m.id);
     try {
       await api.put(`/api/v1/admin/models/${m.id}/toggle`);
       fetchModels();
-    } catch {
-      // ignore
+      toast(m.is_enabled ? "已停用" : "已启用", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "操作失败", "error");
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -184,12 +193,16 @@ export default function AdminModelsPage() {
 
   const handleDelete = async () => {
     if (!confirmDelete) return;
+    setDeleting(true);
     try {
       await api.delete(`/api/v1/admin/models/${confirmDelete.id}`);
+      toast("模型已删除", "success");
       setConfirmDelete(null);
       fetchModels();
-    } catch {
-      // ignore
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "删除失败", "error");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -359,15 +372,16 @@ export default function AdminModelsPage() {
                         <div className="flex items-center justify-end gap-1">
                           <button
                             onClick={() => handleToggle(m)}
+                            disabled={togglingId !== null}
                             title={m.is_enabled ? "停用" : "启用"}
                             className={cn(
-                              "inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs transition-colors",
+                              "inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                               m.is_enabled
                                 ? "text-accent-amber hover:bg-accent-amber/10"
                                 : "text-accent-green hover:bg-accent-green/10"
                             )}
                           >
-                            {m.is_enabled ? <ToggleRight className="size-3.5" /> : <ToggleLeft className="size-3.5" />}
+                            {togglingId === m.id ? <Loader2 className="size-3.5 animate-spin" /> : m.is_enabled ? <ToggleRight className="size-3.5" /> : <ToggleLeft className="size-3.5" />}
                             {m.is_enabled ? "停用" : "启用"}
                           </button>
                           <button
@@ -400,13 +414,17 @@ export default function AdminModelsPage() {
       {/* Create/Edit form modal */}
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setShowForm(false)} />
+          <div className="absolute inset-0 bg-black/50" onClick={() => { if (!saving) setShowForm(false); }} />
           <div className="relative w-full max-w-lg rounded-2xl border border-border-subtle bg-surface-card p-6 shadow-xl">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-lg font-semibold text-text-primary">
                 {editingId ? "编辑模型" : "添加模型"}
               </h3>
-              <button onClick={() => setShowForm(false)} className="text-text-muted hover:text-text-primary">
+              <button
+                onClick={() => setShowForm(false)}
+                disabled={saving}
+                className="text-text-muted hover:text-text-primary disabled:opacity-50"
+              >
                 <X className="size-5" />
               </button>
             </div>
@@ -512,7 +530,8 @@ export default function AdminModelsPage() {
             <div className="flex items-center justify-end gap-3 mt-6">
               <button
                 onClick={() => setShowForm(false)}
-                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light transition-colors"
+                disabled={saving}
+                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light disabled:opacity-50 transition-colors"
               >
                 取消
               </button>
@@ -548,14 +567,17 @@ export default function AdminModelsPage() {
             <div className="flex items-center justify-end gap-3">
               <button
                 onClick={() => setConfirmDelete(null)}
-                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light transition-colors"
+                disabled={deleting}
+                className="rounded-xl px-4 py-2 text-sm text-text-secondary hover:bg-surface-light disabled:opacity-50 transition-colors"
               >
                 取消
               </button>
               <button
                 onClick={handleDelete}
-                className="rounded-xl bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 transition-colors"
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
+                {deleting && <Loader2 className="size-3.5 animate-spin" />}
                 确认删除
               </button>
             </div>

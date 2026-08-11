@@ -16,6 +16,7 @@ def _size(label: str, value: str, aspect: str) -> SizeOption:
 # ─── Image Model Capabilities ────────────────────────────────
 
 IMAGE_CAPABILITIES: dict[str, ModelCapability] = {
+    # ── 星河智云 ──────────────────
     "doubao-seedream-4-5-251128": ModelCapability(
         id="doubao-seedream-4-5-251128",
         name="Doubao-Seedream-4.5",
@@ -58,11 +59,13 @@ IMAGE_CAPABILITIES: dict[str, ModelCapability] = {
         ],
         aspect_ratios=["1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"],
     ),
+    # ── 天翼云 ────────────────────
 }
 
 # ─── Video Model Capabilities ────────────────────────────────
 
 VIDEO_CAPABILITIES: dict[str, ModelCapability] = {
+    # ── 星河智云 ──────────────────
     "doubao-seedance-2-0-260128": ModelCapability(
         id="doubao-seedance-2-0-260128",
         name="Seedance 2.0",
@@ -82,6 +85,17 @@ VIDEO_CAPABILITIES: dict[str, ModelCapability] = {
         cost_per_unit=8,
         durations=[5],
         resolutions=["720p"],
+    ),
+    # ── 天翼云 ────────────────────
+    "tianyi-cdance2.0": ModelCapability(
+        id="tianyi-cdance2.0",
+        name="Seedance 2.0 (天翼云)",
+        vendor="天翼云",
+        type="video",
+        max_batch=1,
+        cost_per_unit=15,
+        durations=[5, 10],
+        resolutions=["480p", "720p", "1080p", "4k"],
     ),
 }
 

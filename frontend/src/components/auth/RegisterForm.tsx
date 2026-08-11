@@ -7,6 +7,7 @@ import Button from "@/components/ui/Button";
 import Input from "@/components/ui/Input";
 import { api } from "@/services/api";
 import { useAuthStore } from "@/store/auth";
+import { useToast } from "@/components/ui/Toast";
 
 interface FormErrors {
   account?: string;
@@ -55,6 +56,7 @@ function validateForm(form: {
 export default function RegisterForm() {
   const router = useRouter();
   const { setAuth } = useAuthStore();
+  const { toast } = useToast();
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [form, setForm] = useState({
@@ -166,6 +168,9 @@ export default function RegisterForm() {
       const message =
         err instanceof Error ? err.message : "注册失败，请重试";
       setServerError(message);
+      // 验证码一次性使用：失败后刷新（否则重试会报"验证码错误"）
+      setForm((prev) => ({ ...prev, captcha: "" }));
+      loadCaptcha();
     } finally {
       setIsLoading(false);
     }
@@ -303,7 +308,8 @@ export default function RegisterForm() {
           <button
             type="button"
             onClick={loadCaptcha}
-            className="shrink-0 flex size-[42px] items-center justify-center rounded-xl border border-border-subtle text-text-muted hover:text-text-secondary hover:border-brand-cyan/30 transition-colors"
+            disabled={captchaLoading}
+            className="shrink-0 flex size-[42px] items-center justify-center rounded-xl border border-border-subtle text-text-muted hover:text-text-secondary hover:border-brand-cyan/30 disabled:opacity-50 disabled:hover:text-text-muted transition-colors"
             title="换一张"
           >
             <RefreshCw className="size-4" />
@@ -340,13 +346,21 @@ export default function RegisterForm() {
 
       <p className="text-xs text-text-muted text-center">
         注册即表示同意{" "}
-        <a href="#" className="text-text-secondary hover:text-brand-cyan">
+        <button
+          type="button"
+          onClick={() => toast("功能建设中", "info")}
+          className="text-text-secondary hover:text-brand-cyan"
+        >
           服务条款
-        </a>
+        </button>
         {" 和 "}
-        <a href="#" className="text-text-secondary hover:text-brand-cyan">
+        <button
+          type="button"
+          onClick={() => toast("功能建设中", "info")}
+          className="text-text-secondary hover:text-brand-cyan"
+        >
           隐私政策
-        </a>
+        </button>
       </p>
     </form>
   );

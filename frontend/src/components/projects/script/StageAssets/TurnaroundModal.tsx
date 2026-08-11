@@ -92,7 +92,7 @@ export default function TurnaroundModal({
     });
 
     try {
-      const body: Record<string, any> = { prompt: anglePrompt, model_id: modelId, size, batch: 1 };
+      const body: Record<string, any> = { prompt: anglePrompt, model_id: modelId, size, batch: 1, source: "project" };
       if (referenceImage) {
         body.reference_images = [referenceImage];
         body.reference_dimension = "character";

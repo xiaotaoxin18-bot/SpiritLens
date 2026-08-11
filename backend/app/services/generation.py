@@ -108,6 +108,8 @@ class GenerationTask:
         }
         # image_urls as JSON string for Redis compatibility
         d["image_urls_json"] = json.dumps(self.image_urls)
+        # params as JSON string so /retry can restore duration/resolution/refs
+        d["params"] = json.dumps(self.params, ensure_ascii=False)
         return {k: v for k, v in d.items() if v is not None}
 
     @classmethod
@@ -121,6 +123,11 @@ class GenerationTask:
         )
         task.status = data.get("status", "pending")
         task.progress = int(data.get("progress", 0))
+        params_raw = data.get("params", {})
+        try:
+            task.params = json.loads(params_raw) if isinstance(params_raw, str) else params_raw
+        except (json.JSONDecodeError, TypeError):
+            task.params = {}
         if data.get("created_at"):
             task.created_at = datetime.fromisoformat(data["created_at"])
         if data.get("completed_at"):
@@ -210,8 +217,14 @@ async def get_task(task_id: str) -> GenerationTask | None:
     return await _load_task(task_id)
 
 
-async def update_progress(task_id: str, progress: int, status: str | None = None, *, force_redis: bool = False):
-    """Update task progress in Redis and notify callbacks."""
+async def update_progress(task_id: str, progress: int, status: str | None = None, *, force_redis: bool = False, skip_callbacks: bool = False):
+    """Update task progress in Redis and notify callbacks.
+
+    Args:
+        skip_callbacks: When True, skip WebSocket progress callbacks.
+                        Use this when called from a background thread to avoid
+                        "Future attached to a different loop" errors.
+    """
     task = await _load_task(task_id, force_redis=force_redis)
     if not task:
         return
@@ -219,7 +232,7 @@ async def update_progress(task_id: str, progress: int, status: str | None = None
     if status:
         task.status = status
     await _save_task(task, force_redis=force_redis)
-    if task_id in _progress_callbacks:
+    if not skip_callbacks and task_id in _progress_callbacks:
         for cb in _progress_callbacks[task_id]:
             try:
                 if asyncio.iscoroutinefunction(cb):

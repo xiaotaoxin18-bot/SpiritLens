@@ -6,12 +6,13 @@ import Link from "next/link";
 import {
   ChevronLeft, FileText, Users, Clapperboard, Film,
   Loader2, Sun, Moon, Cpu, Save, CheckCircle, HelpCircle,
-  FolderOpen, Globe, Palette,
+  FolderOpen, Globe, Home,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/store/auth";
 import { useTheme } from "@/store/theme";
 import { api } from "@/services/api";
+import { useToast } from "@/components/ui/Toast";
 import ScriptStage from "@/components/projects/script/ScriptStage";
 import StageAssets from "@/components/projects/script/StageAssets";
 import StageDirector from "@/components/projects/script/StageDirector";
@@ -49,6 +50,7 @@ export default function EpisodeDetailPage({
   const router = useRouter();
   const { isAuthenticated } = useAuthStore();
   const { theme, toggle: toggleTheme } = useTheme();
+  const { toast } = useToast();
   const [mounted, setMounted] = useState(false);
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [project, setProject] = useState<Project | null>(null);
@@ -66,6 +68,15 @@ export default function EpisodeDetailPage({
   const hideStatusTimeoutRef = useRef<any>(null);
 
   useEffect(() => { setMounted(true); }, []);
+
+  // Restore saved stage after SSR hydration (localStorage not available during SSR)
+  useEffect(() => {
+    const saved = localStorage.getItem(`episode-stage-${resolved.eid}`);
+    if (saved && STAGE_ITEMS.some(s => s.id === saved) && saved !== currentStage) {
+      setCurrentStage(saved as Stage);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolved.eid]);
 
   useEffect(() => {
     if (mounted && !isAuthenticated) router.push("/auth/login");
@@ -260,15 +271,23 @@ export default function EpisodeDetailPage({
             {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </button>
           <div className="flex gap-3 pt-2">
-            <a href="#" className="flex items-center gap-1.5 text-text-muted hover:text-brand-cyan transition-colors">
+            <a
+              href="#"
+              onClick={(e) => { e.preventDefault(); toast("功能建设中，敬请期待", "info"); }}
+              className="flex items-center gap-1.5 text-text-muted hover:text-brand-cyan transition-colors"
+            >
               <Globe className="size-3.5" />
               <span className="font-mono text-[10px] tracking-wide">官网</span>
             </a>
             <span className="text-border-subtle">|</span>
-            <a href="#" className="flex items-center gap-1.5 text-text-muted hover:text-brand-cyan transition-colors">
-              <Palette className="size-3.5" />
-              <span className="font-mono text-[10px] tracking-wide">创作主页</span>
-            </a>
+            <button
+              onClick={() => router.push("/")}
+              className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-brand-purple to-brand-cyan-dim text-white px-3 py-1.5 text-[10px] font-bold tracking-wide hover:shadow-glow-sm transition-all"
+              title="返回首页"
+            >
+              <Home className="size-3.5" />
+              <span>返回首页</span>
+            </button>
           </div>
           <div className="text-[9px] text-text-muted font-mono tracking-wide opacity-60 pt-1">
             SpiritLens v0.1

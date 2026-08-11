@@ -94,7 +94,6 @@
   z-index: 0;
   transform: scale(1.018);
   filter: saturate(1.08) contrast(1.04) brightness(1.02);
-  animation: heroArtDrift 18s ease-in-out infinite alternate;
 }
 
 .hero-layer-mountains {
@@ -118,7 +117,6 @@
   transform: translateY(3%) scale(.95);
   transform-origin: center bottom;
   mix-blend-mode: screen;
-  animation: heroPlatformLayerFloatDark 5.2s ease-in-out infinite;
 }
 
 .hero-layer-crystals {
@@ -130,7 +128,6 @@
   object-fit: contain;
   object-position: center center;
   transform: scale(.9);
-  animation: heroCrystalsFloat 6.8s ease-in-out infinite;
   filter: saturate(1.08) drop-shadow(0 0 16px rgba(48, 220, 255, .22));
 }
 
@@ -142,7 +139,6 @@
 .light .hero-layer-platform,
 .spirit-code-hero[data-theme="light"] .hero-layer-platform {
   transform: translateY(.5%) scale(.95);
-  animation-name: heroPlatformLayerFloatLight;
   mix-blend-mode: normal;
   opacity: .94;
 }
@@ -212,7 +208,6 @@
   width: clamp(150px, 14vw, 245px);
   aspect-ratio: 1.18 / 1;
   transform: rotate(-13deg);
-  animation: crystalHoverCube 5.8s ease-in-out infinite;
 }
 
 .crystal-float-gem-left {
@@ -221,7 +216,6 @@
   width: clamp(70px, 6.2vw, 112px);
   aspect-ratio: 1;
   border-radius: 50%;
-  animation: crystalHoverGemLeft 6.6s ease-in-out infinite;
 }
 
 .crystal-float-pyramid {
@@ -231,7 +225,6 @@
   aspect-ratio: 1.05 / .86;
   border-radius: 26% 18% 34% 18%;
   transform: rotate(18deg);
-  animation: crystalHoverPyramid 6.2s ease-in-out infinite;
 }
 
 .crystal-float-gem-right {
@@ -240,7 +233,6 @@
   width: clamp(88px, 7.2vw, 128px);
   aspect-ratio: 1;
   border-radius: 50%;
-  animation: crystalHoverGemRight 7.1s ease-in-out infinite;
 }
 
 .light .hero-crystal-float,
@@ -285,7 +277,6 @@
   opacity: .55;
   filter: blur(.5px) drop-shadow(0 0 18px rgba(34, 220, 255, .48));
   transform-origin: center;
-  animation: heroPlatformPulse 3.8s ease-in-out infinite;
 }
 
 .hero-particle-field {
@@ -299,14 +290,11 @@
   background-position: 20px 10px, 90px 120px, 210px 48px;
   mix-blend-mode: screen;
   mask-image: radial-gradient(ellipse at 50% 44%, black 0 58%, transparent 80%);
-  animation: heroParticlesFloat 22s linear infinite;
 }
 
 .particle-b {
   opacity: .6;
   transform: scale(1.08) rotate(9deg);
-  animation-duration: 31s;
-  animation-direction: reverse;
 }
 
 /* ─── 山体底部雾气层 ─── */
@@ -527,7 +515,7 @@
 }
 
 .hero-title {
-  margin: 25px auto 18px;
+  margin: 36px auto 26px;
   line-height: .95;
   font-weight: 950;
   text-wrap: balance;
@@ -571,7 +559,7 @@
 }
 
 .hero-subtitle {
-  margin: 0 auto 27px;
+  margin: 0 auto 34px;
   color: var(--hero-soft);
   font-size: clamp(17px, 1.55vw, 21px);
   line-height: 1.68;
@@ -615,7 +603,7 @@
   display: flex;
   justify-content: center;
   gap: 18px;
-  margin-top: 31px;
+  margin-top: 40px;
 }
 
 .hero-button {
@@ -871,8 +859,8 @@
   z-index: 3;
   width: 100%;
   overflow: visible;
-  margin-top: -104px;
-  padding-top: clamp(250px, 20vw, 370px);
+  margin-top: -85px;
+  padding-top: clamp(40px, 6vw, 120px);
   background:
     linear-gradient(180deg, rgba(2, 4, 13, 0) 0, rgba(2, 4, 13, .22) 220px, #02040d 720px),
     url("/spiritlens/spiritlens-hero/hero-layer-extension-dark.png?v=180-feather");
@@ -937,6 +925,7 @@
 }
 
 .light .home-content-shell::before {
+  top: -86px;
   background:
     linear-gradient(180deg, rgba(244, 249, 255, .02) 0, rgba(241, 247, 255, .05) 46%, rgba(247, 250, 255, .88) 100%),
     radial-gradient(ellipse at 50% 12%, rgba(112, 204, 255, .13), transparent 44%),
@@ -948,12 +937,13 @@
 
 .light .home-content-shell {
   margin-top: -1px;
-  padding-top: calc(var(--reflection-height) + 46px);
+  padding-top: clamp(108px, 14vh, 148px);
   overflow: hidden;
   background: transparent;
 }
 
 .light .home-content-shell::after {
+  top: -96px;
   z-index: 0;
   background:
     linear-gradient(90deg, rgba(255,255,255,.12), transparent 18% 82%, rgba(255,255,255,.12)),
@@ -964,8 +954,13 @@
 
 .light .home-mountain-reflection {
   display: block;
+  top: 0px;
   background-image: url("/spiritlens/spiritlens-hero/layers/mountains-light.png");
   background-position: center bottom;
+}
+
+.light .tool-grid {
+  margin-top: -90px;
 }
 
 @media (max-width: 980px) {

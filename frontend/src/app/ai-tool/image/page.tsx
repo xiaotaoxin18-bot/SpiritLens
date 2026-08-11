@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   ArrowUp, Sparkles, Settings2, ImagePlus, ChevronDown,
-  Loader2, X, Download, Heart, RefreshCw, Check, ZoomIn,
+  Loader2, X, Download, Heart, RefreshCw, Check, ZoomIn, AlertCircle,
   GalleryThumbnails, Copy, CheckCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,6 +15,9 @@ import { MoreMenu } from "@/components/ui/MoreMenu";
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { api } from "@/services/api";
 import { useToast } from "@/components/ui/Toast";
+import { restoreHistory, collectBackendIds } from "@/lib/session-recovery";
+import { downloadMedia } from "@/lib/download";
+import { useAntiAutoClick, isRateLimited } from "@/lib/use-anti-auto-click";
 
 interface ImageParams {
   size: string;
@@ -75,11 +78,21 @@ export default function ImageGenPage() {
   const [refDimension, setRefDimension] = useState<"style" | "character">("style");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  // 异常点击检测（自动化批量提交）→ 锁 30 秒
+  const { locked, remaining, guardClick, forceLock } = useAntiAutoClick();
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewDownloading, setPreviewDownloading] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>(DEFAULT_MODELS);
   const [capabilities, setCapabilities] = useState<Record<string, ModelCapability>>({});
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const promptRef = useRef<HTMLDivElement>(null);
+  const mentionRef = useRef<HTMLDivElement>(null);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState("");
+  const [mentionAtPos, setMentionAtPos] = useState(0);
+  const [mentionActiveIdx, setMentionActiveIdx] = useState(0);
+  const [mentionPos, setMentionPos] = useState({ top: 0, left: 0 });
 
   const { toast } = useToast();
   const {
@@ -163,9 +176,16 @@ export default function ImageGenPage() {
   }, [modelId, availableSizes.length]);
 
   useEffect(() => {
-    if (hydrated && sessions.filter((s) => s.kind === "image").length === 0) create("image");
+    if (!hydrated) return;
+    // 每次打开都从后端合并历史（内部有防重入标志，video/image 两页共享，幂等）
+    restoreHistory().then(() => {
+      // 合并后如果仍无图片会话，再创建新的空会话
+      if (useSessionStore.getState().sessions.filter((s) => s.kind === "image").length === 0) {
+        create("image");
+      }
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, sessions.length]);
+  }, [hydrated]);
 
   // Sync activeId to an image session so sidebar highlight is correct
   useEffect(() => {
@@ -210,7 +230,16 @@ export default function ImageGenPage() {
     setReferences([]);
   };
 
-  const handleDeleteSession = (id: string) => {
+  const handleDeleteSession = async (id: string) => {
+    const target = sessions.find((s) => s.id === id);
+    if (target) {
+      // 全局删除：同步删除该会话所有记录的后端数据，换设备/再登录后不再出现
+      await Promise.all(
+        collectBackendIds(target).map((bid) =>
+          api.delete(`/api/v1/user/assets/${bid}`).catch(() => {})
+        )
+      );
+    }
     remove(id);
     if (sessions.filter((s) => s.kind === "image").length <= 1) {
       create("image");
@@ -327,11 +356,136 @@ export default function ImageGenPage() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : "请求失败";
       updateGeneration(sessionId, id, { status: "failed", progress: 0, errorMessage: msg });
+      // 后端 429 限流 → 触发异常点击锁定
+      if (isRateLimited(err)) forceLock();
       if (!useSessionStore.getState().sessions.find(s => s.id === sessionId)?.generations.some(g => g.status === "running")) {
         setIsRunning(false);
       }
     }
   };
+
+  // ─── Convert plain text to HTML with @图N rendered as colored chips ──
+  const textToHtml = (text: string): string => {
+    if (!text) return "";
+    return text.replace(/(@?图\d+)/g, (match) => {
+      const label = match.startsWith("@") ? match : "@" + match;
+      return '<span contenteditable="false" class="inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded-md bg-brand-cyan/15 text-brand-cyan font-bold font-mono border border-brand-cyan/30" data-mention="' + label + '">' + label + "</span> ";
+    });
+  };
+
+  // ─── @mention 参考图 ────────────────────────
+  const mentionItems = references.length > 0
+    ? references.map((url, i) => ({ url, label: `图${i + 1}` }))
+        .filter(item => !mentionFilter || item.label.includes(mentionFilter))
+    : [];
+
+  // Close mention dropdown on click outside
+  useEffect(() => {
+    if (!mentionOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        mentionRef.current && !mentionRef.current.contains(e.target as Node) &&
+        promptRef.current && !promptRef.current.contains(e.target as Node)
+      ) {
+        setMentionOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [mentionOpen]);
+
+  // Measure cursor position in contentEditable for @mention positioning
+  const getCursorPos = (): { top: number; left: number } => {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.getRangeAt(0)) return { top: 0, left: 0 };
+    const range = sel.getRangeAt(0);
+    const rects = range.getClientRects();
+    if (rects.length > 0) {
+      return { top: rects[0].top - 4, left: rects[0].left };
+    }
+    const el = promptRef.current;
+    if (!el) return { top: 0, left: 0 };
+    const r = el.getBoundingClientRect();
+    return { top: r.top + r.height, left: r.left };
+  };
+
+  // Handle contentEditable input — sync plain text + detect @ for mention
+  const handlePromptInput = () => {
+    if (!promptRef.current) return;
+    const val = promptRef.current.textContent || "";
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0) {
+      const r = sel.getRangeAt(0);
+      if (r.startContainer.nodeType === Node.TEXT_NODE) {
+        const pos = r.startOffset;
+        const txt = (r.startContainer.textContent || "");
+        const before = txt.slice(0, pos);
+        if (before.endsWith("@") && !mentionOpen) {
+          setMentionOpen(true); setMentionFilter(""); setMentionAtPos(1); setMentionActiveIdx(0);
+          setMentionPos(getCursorPos());
+        } else if (mentionOpen && pos <= 0) {
+          setMentionOpen(false);
+        }
+      } else if (mentionOpen) {
+        setMentionOpen(false);
+      }
+    }
+    setPrompt(val);
+  };
+
+  // Handle contentEditable keyboard — mention navigation / Enter to submit
+  const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (mentionOpen && mentionItems.length > 0) {
+      if (e.key === "Enter") { e.preventDefault(); insertMention(mentionItems[mentionActiveIdx].label); return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); setMentionActiveIdx(i => Math.min(i + 1, mentionItems.length - 1)); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); setMentionActiveIdx(i => Math.max(i - 1, 0)); return; }
+      if (e.key === "Escape") { setMentionOpen(false); return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
+  // Insert chip mention into contentEditable
+  const insertMention = (label: string) => {
+    if (!promptRef.current) return;
+    const el = promptRef.current;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) {
+      el.innerHTML += textToHtml(label + " ");
+      setPrompt(el.textContent || "");
+      setMentionOpen(false);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    const chip = document.createElement("span");
+    chip.contentEditable = "false";
+    chip.className = "inline-flex items-center px-1.5 py-0.5 mx-0.5 rounded-md bg-brand-cyan/15 text-brand-cyan font-bold font-mono border border-brand-cyan/30";
+    chip.textContent = "@" + label;
+    chip.dataset.mention = label;
+    if (range.startContainer.nodeType === Node.TEXT_NODE && range.startOffset > 0) {
+      range.setStart(range.startContainer, range.startOffset - 1);
+    }
+    range.deleteContents();
+    range.insertNode(chip);
+    const space = document.createTextNode(" ");
+    range.setStartAfter(chip);
+    range.insertNode(space);
+    range.setStartAfter(space);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    setPrompt(el.textContent || "");
+    setMentionOpen(false);
+  };
+
+  // Sync prompt state → div content when prompt is set externally (rerun, clear)
+  useEffect(() => {
+    if (promptRef.current && promptRef.current.textContent !== prompt) {
+      promptRef.current.innerHTML = textToHtml(prompt);
+    }
+  }, [prompt]);
 
   const handleRerun = (g: GenerationResult) => {
     setPrompt(g.prompt);
@@ -593,19 +747,44 @@ export default function ImageGenPage() {
             )}
 
             <div className="rounded-3xl border border-white/[0.08] light:border-black/[0.08] bg-surface-card/[0.96] shadow-[0_24px_60px_-30px_rgba(0,0,0,0.5)]">
-              <div className="px-5 pt-4">
-                <textarea
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      handleSubmit();
-                    }
-                  }}
-                  placeholder="描述你想要的画面，例如：一只在太空漫步的猫，赛博朋克风格... Enter 发送 · Shift+Enter 换行"
-                  className="min-h-20 w-full resize-none border-0 bg-transparent p-0 text-[15px] leading-relaxed text-primary/70 placeholder:text-muted focus:outline-none focus:ring-0"
+              <div className="relative pt-4">
+                <div
+                  ref={promptRef}
+                  contentEditable
+                  suppressContentEditableWarning
+                  onInput={handlePromptInput}
+                  onKeyDown={handlePromptKeyDown}
+                  className="min-h-32 max-h-60 overflow-y-auto w-full border-0 bg-transparent p-0 text-[15px] leading-relaxed text-primary/70 outline-none [&amp;:empty:before]:content-[attr(data-placeholder)] [&amp;:empty:before]:text-text-muted/30"
+                  data-placeholder="描述你想要的画面，例如：一只在太空漫步的猫，赛博朋克风格... Enter 发送 · Shift+Enter 换行（输入 @ 引用参考图）"
                 />
+                {/* @mention dropdown */}
+                {mentionOpen && mentionItems.length > 0 && (
+                  <div
+                    ref={mentionRef}
+                    className="absolute bottom-full left-0 z-50 mb-2 w-72 max-h-48 overflow-y-auto rounded-2xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl p-1.5"
+                  >
+                    <div className="px-3 py-1.5 text-[10px] font-mono text-muted uppercase tracking-wider border-b border-white/[0.06] mb-1">
+                      参考图（输入 @ 引用）
+                    </div>
+                    {mentionItems.map((item, i) => (
+                      <button
+                        key={item.url}
+                        onClick={() => insertMention(item.label)}
+                        onMouseEnter={() => setMentionActiveIdx(i)}
+                        className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-xs transition-colors ${
+                          i === mentionActiveIdx
+                            ? "bg-brand-cyan/10 text-brand-cyan"
+                            : "text-secondary hover:bg-white/[0.05] light:hover:bg-black/[0.04]"
+                        }`}
+                      >
+                        <div className="size-8 shrink-0 overflow-hidden rounded-lg border border-white/[0.08] bg-white/[0.03]">
+                          <img src={imgUrl(item.url)} alt="" className="h-full w-full object-cover" />
+                        </div>
+                        <span className="font-mono font-bold text-brand-cyan">{item.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="flex items-center gap-2 px-3 pb-3 pt-3">
@@ -627,7 +806,12 @@ export default function ImageGenPage() {
                     <Loader2 className="size-3 animate-spin" />生成中...
                   </span>
                 )}
-                <button onClick={handleSubmit} disabled={!prompt.trim()} className={cn("flex size-10 items-center justify-center rounded-full transition-all", prompt.trim() ? "bg-brand-purple text-white shadow-md hover:brightness-110 active:scale-95" : "bg-white/[0.05] light:bg-black/[0.04] text-muted cursor-not-allowed")}>
+                {locked && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-[11px] text-red-400">
+                    <AlertCircle className="size-3" />异常点击，已锁定 {remaining} 秒
+                  </span>
+                )}
+                <button onClick={() => guardClick(handleSubmit)} disabled={!prompt.trim() || locked} className={cn("flex size-10 items-center justify-center rounded-full transition-all", (prompt.trim() && !locked) ? "bg-brand-purple text-white shadow-md hover:brightness-110 active:scale-95" : "bg-white/[0.05] light:bg-black/[0.04] text-muted cursor-not-allowed")}>
                   <ArrowUp className="size-4" />
                 </button>
               </div>
@@ -654,9 +838,16 @@ export default function ImageGenPage() {
             download
             className="absolute right-16 top-4 flex size-10 items-center justify-center rounded-full bg-white/10 text-white/70 hover:bg-white/20 hover:text-white transition-colors"
             title="下载"
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (previewDownloading) return;
+              setPreviewDownloading(true);
+              downloadMedia(imgUrl(previewUrl), previewUrl.split("/").pop() || "image.png")
+                .finally(() => setPreviewDownloading(false));
+            }}
           >
-            <Download className="size-5" />
+            {previewDownloading ? <Loader2 className="size-5 animate-spin" /> : <Download className="size-5" />}
           </a>
           <img
             src={imgUrl(previewUrl)}
@@ -687,6 +878,7 @@ function GenerationCard({ gen, models, onDelete, onRerun, onCancel, onPreview, o
 }) {
   const [publishUrl, setPublishUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [expandedPrompt, setExpandedPrompt] = useState(false);
   const isRunning = gen.status === "running";
   const isFailed = gen.status === "failed";
@@ -699,11 +891,11 @@ function GenerationCard({ gen, models, onDelete, onRerun, onCancel, onPreview, o
 
   const firstImageUrl = gen.imageUrls?.[0];
   const handleDownload = () => {
-    if (!firstImageUrl) return;
-    const a = document.createElement("a");
-    a.href = imgUrl(firstImageUrl);
-    a.download = `spiritlens-${gen.id}.png`;
-    a.click();
+    if (!firstImageUrl || downloading) return;
+    setDownloading(true);
+    // 优先 fetch blob 直连 CDN，失败回退同源代理
+    downloadMedia(imgUrl(firstImageUrl), `spiritlens-${gen.id}.png`)
+      .finally(() => setDownloading(false));
   };
   const handleCopyPrompt = async () => {
     try {
@@ -782,7 +974,7 @@ function GenerationCard({ gen, models, onDelete, onRerun, onCancel, onPreview, o
               <MoreMenu items={[
                 { label: "使用提示词", icon: <RefreshCw className="size-3.5" />, onClick: () => onUsePrompt?.(gen.prompt, gen.references) },
                 { label: "发布到社区", icon: <Sparkles className="size-3.5" />, onClick: () => setPublishUrl(firstImageUrl || null) },
-                { label: "下载", icon: <Download className="size-3.5" />, onClick: handleDownload },
+                { label: downloading ? "下载中…" : "下载", icon: downloading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />, onClick: handleDownload },
                 ...(onAddReference && firstImageUrl ? [{ label: "用作参考图", icon: <ImagePlus className="size-3.5" />, onClick: () => onAddReference(firstImageUrl) }] : []),
               ]} />
             </>

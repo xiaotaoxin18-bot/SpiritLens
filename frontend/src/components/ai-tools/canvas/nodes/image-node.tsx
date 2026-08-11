@@ -1,13 +1,15 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { Handle, Position, type NodeProps, useUpdateNodeInternals } from "@xyflow/react";
 import {
   Sparkles, ChevronDown, Trash2, Loader2, Maximize2, ImagePlus,
   UploadCloud, ArrowUp, ArrowDownToLine, Type, Lock, Unlock, Dice5, MinusSquare,
   Hash, Languages, Clapperboard, UserPlus, Download, Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { api } from "@/services/api";
+import { downloadMedia } from "@/lib/download";
 import type { CanvasNodeData, ImageParams } from "../types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
@@ -39,13 +41,15 @@ type ImageNodeData = CanvasNodeData & {
   onSetUploadedImage?: (url: string) => void;
   upstreamPrompts?: string[];
   inputImageUrl?: string;
+  isDragging?: boolean;
+  isMultiSelect?: boolean;
   canvasModels?: Array<{ id: string; name: string; vendor?: string; cost_per_unit?: number }>;
   supportedSizes?: Array<{ label: string; value: string }>;
 };
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
-export function ImageNode({ data: rawData, selected }: NodeProps) {
+export function ImageNode({ id, data: rawData, selected }: NodeProps) {
   const data = rawData as unknown as ImageNodeData;
   const models = data.canvasModels || [];
   const model = models.find((m) => m.id === data.modelId) ?? models[0] ?? { id: "", name: "加载中" };
@@ -59,12 +63,19 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
   const allImages = data.imageUrls ?? [];
   const [primaryIdx, setPrimaryIdx] = useState(0);
   const [lastImageUrls, setLastImageUrls] = useState(data.imageUrls);
+  const [naturalAspect, setNaturalAspect] = useState<number | null>(null);
   if (lastImageUrls !== data.imageUrls) {
     setLastImageUrls(data.imageUrls);
     setPrimaryIdx(0);
+    setNaturalAspect(null); // Reset on new image set
   }
   const cover = allImages[Math.min(primaryIdx, allImages.length - 1)];
   const progress = Math.round(data.progress ?? 0);
+
+  // Actual displayed aspect: use loaded image's natural ratio, fall back to configured size
+  const displayAspect = naturalAspect !== null
+    ? { aspectRatio: `${naturalAspect}` }
+    : aspect;
 
   const [wantWriting, setWantWriting] = useState(false);
   const [lastIsIdle, setLastIsIdle] = useState(isIdle);
@@ -74,17 +85,48 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
   }
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const updateNodeInternals = useUpdateNodeInternals();
 
-  const showChoicePicker = selected && isIdle && !wantWriting;
-  const showBottomPanel = selected && !isRunning && !showChoicePicker;
-  const showTopToolbar = selected && isSucceeded && !!cover;
+  useLayoutEffect(() => {
+    updateNodeInternals(id);
+  }, [
+    id,
+    updateNodeInternals,
+    naturalAspect,
+    currentSize,
+    cover,
+    data.inputImageUrl,
+    data.upstreamPrompts?.length,
+    allImages.length,
+    isIdle,
+    isRunning,
+    isSucceeded,
+    isFailed,
+  ]);
 
-  // Loading image from uploaded file
-  const onPickFile = (file: File) => {
+  const showChoicePicker = selected && isIdle && !wantWriting && !data.isMultiSelect;
+  const showBottomPanel = selected && !isRunning && !showChoicePicker && !data.isMultiSelect;
+  const showTopToolbar = selected && isSucceeded && !!cover && !data.isMultiSelect;
+
+  // Upload image file to server, fall back to data URL only on failure
+  const onPickFile = async (file: File) => {
     if (file.size > MAX_UPLOAD_BYTES) return;
-    const reader = new FileReader();
-    reader.onload = () => data.onSetUploadedImage?.(reader.result as string);
-    reader.readAsDataURL(file);
+    setUploading(true);
+    try {
+      const result = await api.uploadFile("/api/v1/upload", file);
+      if (result.urls?.length > 0) {
+        data.onSetUploadedImage?.(result.urls[0]);
+      }
+    } catch {
+      console.warn("[ImageNode] server upload failed, falling back to data URL");
+      const reader = new FileReader();
+      reader.onload = () => data.onSetUploadedImage?.(reader.result as string);
+      reader.readAsDataURL(file);
+    } finally {
+      setUploading(false);
+    }
   };
 
   return (
@@ -126,13 +168,17 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
       {/* Result area */}
       {(isRunning || isSucceeded || isFailed) && (
         <>
-          <div className="relative w-full bg-white/[0.06] light:bg-black/[0.03]" style={aspect}>
+          <div className="relative w-full bg-white/[0.06] light:bg-black/[0.03]" style={displayAspect}>
             {cover ? (
               <img
                 src={imgUrl(cover)}
                 alt={data.prompt}
                 className="absolute inset-0 h-full w-full object-cover"
                 draggable={false}
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  setNaturalAspect(img.naturalWidth / img.naturalHeight);
+                }}
               />
             ) : (
               <div className="absolute inset-0 bg-gradient-to-br from-brand-purple/5 via-brand-mid/5 to-brand-cyan/5" />
@@ -162,7 +208,7 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
                   type="button"
                   onClick={() => setPrimaryIdx(i)}
                   className={cn(
-                    "relative size-12 shrink-0 overflow-hidden rounded-lg border-2 transition-colors",
+                    "relative size-12 shrink-0 overflow-visible rounded-lg border-2 transition-colors",
                     i === primaryIdx ? "border-brand-cyan" : "border-transparent hover:border-white/20"
                   )}
                 >
@@ -176,7 +222,7 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
 
       {/* Reference image preview when idle but has upstream image */}
       {isIdle && data.inputImageUrl && (
-        <div className="relative w-full bg-white/[0.06] light:bg-black/[0.03]" style={aspect}>
+        <div className="relative w-full bg-white/[0.06] light:bg-black/[0.03]" style={displayAspect}>
           <img
             src={imgUrl(data.inputImageUrl)}
             alt="参考图"
@@ -272,9 +318,11 @@ export function ImageNode({ data: rawData, selected }: NodeProps) {
           <ToolBtn icon={<Clapperboard className="size-3.5" />} label="送到视频" onClick={() => data.onSendToVideo?.()} />
           <ToolBtn icon={<UserPlus className="size-3.5" />} label="存为主体" onClick={() => data.onSaveAsSubject?.("subject")} />
           <div className="mx-1 h-5 w-px bg-white/[0.08]" />
-          <ToolBtn icon={<Download className="size-3.5" />} label="下载" onClick={() => {
+          <ToolBtn icon={downloading ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />} label={downloading ? "下载中…" : "下载"} onClick={() => {
             const u = imgUrl(cover);
-            if (u) { const a = document.createElement("a"); a.href = u; a.download = `spiritlens-${data.generationId || "image"}.png`; a.click(); }
+            if (!u || downloading) return;
+            setDownloading(true);
+            downloadMedia(u, `spiritlens-${data.generationId || "image"}.png`).finally(() => setDownloading(false));
           }} />
         </div>
       )}
@@ -330,7 +378,7 @@ function ModelSelector({
         <ChevronDown className="size-2.5 text-muted" />
       </button>
       {open && (
-        <div className="nodrag absolute left-0 top-full z-50 mt-1 w-48 overflow-hidden rounded-xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl">
+        <div className="nodrag absolute left-0 top-full z-50 mt-1 w-48 overflow-visible rounded-xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl">
           <div className="max-h-56 overflow-y-auto p-1">
             {models.map((m) => (
               <button
@@ -467,14 +515,14 @@ function ExpandedPanel({
   return (
     <div
       ref={panelRef}
-      className="nodrag absolute left-1/2 top-full z-30 mt-3 w-[24rem] -translate-x-1/2 rounded-2xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl"
+      className="nodrag absolute left-1/2 top-full z-30 mt-3 w-[700px] -translate-x-1/2 rounded-2xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl"
     >
       {/* Top: thumbnail + upstream text boxes */}
       <div className="flex items-start gap-2 px-3 pt-3">
         {cover ? (
           <img src={imgUrl(cover)} alt="" className="size-12 shrink-0 rounded-lg border border-white/[0.08] light:border-black/[0.08] object-cover" draggable={false} />
         ) : data.inputImageUrl ? (
-          <div className="relative size-12 shrink-0 overflow-hidden rounded-lg border border-brand-cyan/40">
+          <div className="relative size-12 shrink-0 overflow-visible rounded-lg border border-brand-cyan/40">
             <img src={imgUrl(data.inputImageUrl)} alt="参考图" className="h-full w-full object-cover opacity-70" draggable={false} />
             <div className="absolute inset-x-0 bottom-0 bg-brand-cyan/80 text-center text-[7px] font-medium text-white leading-tight">
               参考
@@ -793,7 +841,7 @@ function PopChip({
         <ChevronDown className="size-2.5 text-muted" />
       </button>
       {open && (
-        <div className="absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl">
+        <div className="absolute bottom-full left-0 z-50 mb-1 overflow-visible rounded-xl border border-white/[0.08] light:border-black/[0.08] bg-surface-overlay/[0.98] shadow-xl backdrop-blur-xl">
           {children}
         </div>
       )}

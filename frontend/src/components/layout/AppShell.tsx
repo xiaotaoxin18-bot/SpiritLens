@@ -18,6 +18,7 @@ function isImmersiveRoute(pathname: string) {
 }
 
 function hasFooter(pathname: string) {
+  if (pathname === "/ai-tool/canvas") return false;
   return !NO_FOOTER_ROUTES.some((route) => pathname.startsWith(route));
 }
 
@@ -44,7 +45,7 @@ export default function AppShell({
         >
           {children}
         </main>
-        {!immersive && !isHome && showFooter && <Footer />}
+        {!immersive && showFooter && <Footer />}
       </div>
       </ToastProvider>
     </ThemeProvider>

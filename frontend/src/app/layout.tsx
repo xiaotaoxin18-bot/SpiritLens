@@ -18,6 +18,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "SpiritLens — 一站式 AI 创意创作平台",
   description: "灵境 SpiritLens，释放你的无限想象力。AI 图片生成、视频生成、智能画布，即点即用。",
+  icons: {
+    icon: "/spiritlens/sparkles-favicon.svg",
+  },
 };
 
 export default function RootLayout({

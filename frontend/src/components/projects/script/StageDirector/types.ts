@@ -22,7 +22,11 @@ export interface VideoInterval {
   videoUrl?: string;
   videoPrompt?: string;
   resolution?: string;
+  taskId?: string;
   status: VideoStatus;
+  errorMessage?: string;
+  progress?: number;
+  startedAt?: number;
 }
 
 export type CameraMovement =
@@ -48,10 +52,12 @@ export interface Shot {
   characters: string[];
   props: string[];
   keyframes: Keyframe[];
-  interval?: VideoInterval;
+  interval?: VideoInterval;      // 兼容：单个视频（老数据）；新数据 videos 为主
+  videos?: VideoInterval[];      // 多视频列表（一个镜头可生成多个视频）
   dubbing?: ShotDubbing;
-  uploadedRefImages?: { name: string; url: string }[];
+  uploadedRefImages?: { name: string; url: string; type?: string }[];
   hiddenRefImageUrls?: string[];
+  audioRef?: { name: string; url: string };  // 音频参考（BGM/配音），传给天翼云 audio_url
 }
 
 // ─── Defaults ──────────────────────────────────────────────

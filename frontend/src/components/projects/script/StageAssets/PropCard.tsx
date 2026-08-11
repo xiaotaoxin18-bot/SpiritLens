@@ -1,102 +1,90 @@
 "use client";
 
-import { Package, Check, Trash2, AlertCircle, Upload, ImageIcon, Loader2, Sparkles, FolderPlus, X } from "lucide-react";
-import { cn, resolveImageUrl } from "@/lib/utils";
-import InlineEditableText from "./InlineEditableText";
-import PromptEditor from "./PromptEditor";
+import { useRouter } from "next/navigation";
+import { Package, Check, AlertCircle, Sparkles, Loader2, Upload, Trash2 } from "lucide-react";
+import { resolveImageUrl } from "@/lib/utils";
 import ImageUploadButton from "./ImageUploadButton";
 
 interface PropData {
   id?: string;
   name: string;
-  category?: string;
   description?: string;
   image_url?: string;
-  prompt?: string;
   status?: string;
 }
 
 interface Props {
+  projectId: string;
   prop: PropData;
   isGenerating: boolean;
   onUpload: (file: File) => void;
-  onPromptSave: (prompt: string) => void;
   onGenerate: () => void;
-  onImageClick: (url: string) => void;
-  onDelete: () => void;
-  onUpdateInfo: (updates: Partial<PropData>) => void;
-  onSaveToLibrary: () => void;
+  onDelete?: () => void;
+  variantCount?: number;
 }
 
-const PROP_CATEGORIES = ["武器", "文件/书信", "食物/饮品", "交通工具", "装饰品", "科技设备", "自然物品", "其他"];
-
 export default function PropCard({
-  prop, isGenerating, onUpload, onPromptSave, onGenerate, onImageClick, onDelete, onUpdateInfo, onSaveToLibrary,
+  projectId, prop, isGenerating, onUpload, onGenerate, onDelete, variantCount,
 }: Props) {
+  const router = useRouter();
   const hasImage = !!prop.image_url;
 
+  const handleClick = () => {
+    if (prop.id) {
+      router.push(`/projects/${projectId}/assets/props/${prop.id}`);
+    }
+  };
+
   return (
-    <div className="rounded-2xl border border-border-subtle bg-surface-card overflow-hidden flex flex-col hover:border-border-glow transition-all">
-      <div className="flex gap-4 p-4">
-        <div className="w-36 shrink-0">
-          <div className="aspect-square bg-surface-elevated rounded-xl overflow-hidden relative cursor-pointer group/image"
-            onClick={() => hasImage && onImageClick(prop.image_url!)}
-          >
-            {hasImage ? (
-              <>
-                <img src={resolveImageUrl(prop.image_url)} alt={prop.name} className="w-full h-full object-cover" />
-                <div className="absolute top-1.5 right-1.5 p-1 bg-accent-green rounded-full shadow"><Check className="size-3 text-white" /></div>
-                {/* Hover overlay for regenerate */}
-                <div className="absolute inset-0 bg-black/0 group-hover/image:bg-black/50 transition-all flex items-center justify-center gap-2">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onGenerate(); }}
-                    disabled={isGenerating}
-                    className="hidden group-hover/image:flex items-center gap-1 px-3 py-1.5 rounded-lg bg-white/20 text-white text-[10px] backdrop-blur-sm hover:bg-white/30 transition-all disabled:opacity-50"
-                  >
-                    {isGenerating ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />}
-                    重新生成
-                  </button>
+    <div
+      onClick={handleClick}
+      className="rounded-2xl border border-border-subtle bg-surface-card overflow-hidden flex flex-col cursor-pointer hover:border-border-glow hover:shadow-sm transition-all"
+    >
+      {/* Image — padding-bottom square */}
+      <div className="relative w-full" style={{ paddingBottom: "100%" }}>
+        <div className="absolute inset-0 bg-surface-elevated group/image cursor-pointer">
+          {hasImage ? (
+            <>
+              <img src={resolveImageUrl(prop.image_url)} alt={prop.name} className="w-full h-full object-cover" />
+              <div className="absolute top-2 right-2 p-1 bg-accent-green rounded-full shadow"><Check className="size-3 text-white" /></div>
+              {/* Variant count badge */}
+              {variantCount != null && variantCount > 0 && (
+                <div className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded-md bg-black/60 text-white text-[9px] font-bold backdrop-blur-sm">
+                  +{variantCount}
                 </div>
-              </>
-            ) : (
-              <div className="w-full h-full flex flex-col items-center justify-center text-text-muted p-2 text-center gap-2">
-                <Package className="size-6 opacity-20" />
-                <ImageUploadButton onUpload={onUpload} onGenerate={onGenerate} isGenerating={isGenerating} size="small" />
+              )}
+              {/* Delete button — hover visible */}
+              {onDelete && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                  className="absolute top-2 left-2 p-1 rounded-full bg-black/50 text-white opacity-0 group-hover/image:opacity-100 hover:bg-red-500 transition-all z-10"
+                >
+                  <Trash2 className="size-3" />
+                </button>
+              )}
+              {/* Hover overlay */}
+              <div className="absolute inset-0 bg-black/0 group-hover/image:bg-black/40 transition-all flex items-center justify-center">
+                <span className="text-white/0 group-hover/image:text-white text-xs font-medium transition-all flex items-center gap-1.5">
+                  <span className="size-1.5 rounded-full bg-white/60" />
+                  点击编辑
+                  <span className="size-1.5 rounded-full bg-white/60" />
+                </span>
               </div>
-            )}
-          </div>
-        </div>
-
-        <div className="flex-1 space-y-2">
-          <div className="flex items-start justify-between">
-            <div>
-              <InlineEditableText value={prop.name} onSave={(v) => onUpdateInfo({ name: v })} className="text-sm font-bold text-text-primary" inputClassName="font-bold text-sm" />
-              <select
-                value={prop.category || ""}
-                onChange={(e) => onUpdateInfo({ category: e.target.value })}
-                className="mt-1 text-[10px] font-mono text-text-muted bg-surface-elevated border border-border-subtle rounded px-1.5 py-0.5 outline-none focus:border-brand-cyan/30"
-              >
-                <option value="">选择分类</option>
-                {PROP_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+            </>
+          ) : (
+            <div className="w-full h-full flex flex-col items-center justify-center text-text-muted p-4 text-center gap-2">
+              <Package className="size-8 opacity-20" />
+              <div onClick={(e) => e.stopPropagation()}>
+                <ImageUploadButton onUpload={onUpload} onGenerate={onGenerate} isGenerating={isGenerating} uploadLabel="上传" generateLabel="生成" />
+              </div>
             </div>
-            <button onClick={onDelete} className="p-1.5 rounded-lg text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"><Trash2 className="size-3.5" /></button>
-          </div>
-
-          <textarea
-            value={prop.description || ""}
-            onChange={(e) => onUpdateInfo({ description: e.target.value })}
-            rows={2}
-            placeholder="道具描述..."
-            className="w-full bg-transparent text-xs text-text-secondary placeholder:text-text-muted/30 outline-none resize-none border border-transparent focus:border-brand-cyan/20 rounded-lg px-2 py-1 transition-colors"
-          />
-
-          <PromptEditor prompt={prop.prompt || ""} onSave={onPromptSave} label="道具提示词" placeholder="输入道具视觉描述..." />
-
-          <button onClick={onSaveToLibrary} className="w-full py-2 rounded-lg bg-surface-elevated text-text-muted hover:text-text-primary border border-border-subtle text-[9px] font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-all hover:border-border-glow">
-            <FolderPlus className="size-3" /> 加入资产库
-          </button>
+          )}
         </div>
+      </div>
+
+      {/* Name */}
+      <div className="px-2 py-2.5 text-center">
+        <span className="text-xs font-bold text-text-primary block truncate">{prop.name}</span>
       </div>
     </div>
   );

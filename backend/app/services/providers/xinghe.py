@@ -14,6 +14,10 @@ from app.services.file_storage import save_upload
 
 logger = logging.getLogger(__name__)
 
+# Retry settings for video API submission
+VIDEO_SUBMIT_TIMEOUT = 120.0   # seconds per attempt
+VIDEO_SUBMIT_MAX_RETRIES = 2   # retry count (3 total attempts)
+
 settings = get_settings()
 
 XINGHE_API_KEY = settings.XINGHE_API_KEY or settings.NOVAI_API_KEY
@@ -45,8 +49,10 @@ async def generate_video(
     resolution: str = "720p",
     camera: str = "static",
     reference_images: list[str] | None = None,
+    reference_audio: str | None = None,  # 星河暂不支持音频参考，忽略（仅保持签名一致）
     progress_callback=None,
     cancel_event=None,
+    cancel_check=None,
 ) -> dict:
     """Generate video via Xinghe Zhiyun /v1/videos API.
 
@@ -90,8 +96,15 @@ async def generate_video(
         content_parts = [
             {"type": "text", "text": prompt},
         ]
-        for url in reference_images[:3]:
-            full_url = url if url.startswith("http") else f"{settings.PUBLIC_URL}{url}"
+        for url in reference_images[:9]:
+            if url.startswith("http"):
+                full_url = url
+            elif url.startswith("/spiritlens/"):
+                # 前端相对化存储的 COS/CDN 路径 → 拼媒体域名
+                base = settings.OSS_PUBLIC_URL or settings.PUBLIC_URL
+                full_url = f"{base.rstrip('/')}{url}"
+            else:
+                full_url = f"{settings.PUBLIC_URL}{url}"
             content_parts.append({
                 "type": "image_url",
                 "image_url": {"url": full_url},
@@ -99,19 +112,34 @@ async def generate_video(
         body["content"] = content_parts
         body.pop("prompt", None)
 
-    logger.info("Xinghe video request: model=%s seconds=%d size=%s refs=%d",
-                 body["model"], seconds, video_size, len(reference_images or []))
+    logger.warning("Xinghe video request: model=%s seconds=%d size=%s refs=%d",
+                    body["model"], seconds, video_size, len(reference_images or []))
     logger.warning("Xinghe video BODY: %s", json.dumps(body, ensure_ascii=False))
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{XINGHE_VIDEO_BASE}/videos",
-            headers={
-                "Authorization": f"Bearer {XINGHE_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-        )
+    # Submit with retry — the video API can be slow to respond
+    last_error: Exception | None = None
+    for attempt in range(1 + VIDEO_SUBMIT_MAX_RETRIES):
+        try:
+            async with httpx.AsyncClient(timeout=VIDEO_SUBMIT_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{XINGHE_VIDEO_BASE}/videos",
+                    headers={
+                        "Authorization": f"Bearer {XINGHE_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                )
+            last_error = None
+            break  # success
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            last_error = exc
+            logger.warning("Xinghe video submit attempt %d/%d failed: %s",
+                           attempt + 1, 1 + VIDEO_SUBMIT_MAX_RETRIES, exc)
+            if attempt < VIDEO_SUBMIT_MAX_RETRIES:
+                await asyncio.sleep(2.0 * (attempt + 1))  # 2s, 4s backoff
+
+    if last_error is not None:
+        raise RuntimeError(f"星河视频API提交失败（重试{VIDEO_SUBMIT_MAX_RETRIES}次后）: {last_error}")
 
     if resp.status_code != 200:
         error_detail = _extract_error(resp)
@@ -133,7 +161,7 @@ async def generate_video(
         await asyncio.sleep(poll_interval)
 
         if cancel_event and cancel_event.is_set():
-            raise RuntimeError("Task cancelled by user")
+            raise RuntimeError(f"[星河任务ID:{video_id}] Task cancelled by user")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             poll_resp = await client.get(
@@ -155,20 +183,26 @@ async def generate_video(
             if progress_callback:
                 await progress_callback(95, "downloading")
 
-            # Download MP4 from /v1/videos/{video_id}/content
+            # Download MP4 from /v1/videos/{video_id}/content — streamed to disk
+            # (chunked writes keep memory flat; cancel_check aborts mid-download)
             local_video_url = ""
             try:
+                from app.services.file_storage import save_upload_stream
                 async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as dl_client:
-                    dl_resp = await dl_client.get(
+                    async with dl_client.stream(
+                        "GET",
                         f"{XINGHE_VIDEO_BASE}/videos/{video_id}/content",
                         headers={"Authorization": f"Bearer {XINGHE_API_KEY}"},
-                    )
-                    if dl_resp.status_code == 200:
-                        content_type = dl_resp.headers.get("content-type", "video/mp4")
-                        local_video_url = await save_upload(dl_resp.content, content_type)
-                        logger.info("Video saved locally: %s", local_video_url)
-                    else:
-                        logger.warning("Failed to download video content: HTTP %d", dl_resp.status_code)
+                    ) as dl_resp:
+                        if dl_resp.status_code == 200:
+                            content_type = dl_resp.headers.get("content-type", "video/mp4")
+                            local_video_url = await save_upload_stream(
+                                dl_resp.aiter_bytes(), content_type,
+                                cancel_event=cancel_event, cancel_check=cancel_check,
+                            )
+                            logger.info("Video saved locally: %s", local_video_url)
+                        else:
+                            logger.warning("Failed to download video content: HTTP %d", dl_resp.status_code)
             except Exception as e:
                 logger.warning("Failed to download video: %s", e)
 
@@ -176,7 +210,7 @@ async def generate_video(
                 await progress_callback(100, "completed")
 
             if not local_video_url:
-                raise RuntimeError("Video content download failed — no URL returned")
+                raise RuntimeError(f"[星河任务ID:{video_id}] Video content download failed — no URL returned")
 
             return {
                 "video_url": local_video_url,
@@ -191,9 +225,9 @@ async def generate_video(
 
         if status in ("failed", "error"):
             error_msg = status_data.get("error") or status_data.get("message") or "Video generation failed"
-            raise RuntimeError(error_msg)
+            raise RuntimeError(f"[星河任务ID:{video_id}] {error_msg}")
 
-    raise RuntimeError("Video generation timed out")
+    raise RuntimeError(f"[星河任务ID:{video_id}] Video generation timed out")
 
 
 PUBLIC_URL = settings.PUBLIC_URL.rstrip("/")
@@ -226,6 +260,9 @@ def _ensure_min_size(size: str, model_id: str | None = None) -> str:
         return size
 
     min_pixels = cap.min_pixels
+    if min_pixels is None:
+        return size  # No minimum pixel requirement for this model
+
     step = cap.step_size or 64
     current_pixels = w * h
 

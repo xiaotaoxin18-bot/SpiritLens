@@ -22,6 +22,10 @@ class Character(Base):
     prompt: Mapped[str | None] = mapped_column(
         Text, comment="AI 生成提示词，用于保持角色一致性", default=None
     )
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(), nullable=True, default=None,
+        comment="变体组：相同 group_id 的属于同一组，null 表示主角色",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow

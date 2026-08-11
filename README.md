@@ -19,7 +19,7 @@ SpiritLens（灵境）是一个面向个人创作者和专业工作室的 AI 创
 
 - **AI 图片生成** — 文生图 / 图生图，支持模型选择、参考图（上传 + 联网搜索）、高级参数（seed/批次/负向提示词）
 - **AI 视频生成** — 文生视频 / 首尾帧 / 图生视频，多种 Seedance 模型
-- **智能画布（无限画布）** — 基于 ReactFlow v12 的节点式工作流，支持自由缩放、框选、拖拽、连线、真实 API 生成
+- **智能画布（无限画布）** — 多项目管理 + 基于 ReactFlow v12 的节点式工作流，支持自由缩放、框选、拖拽、连线、真实 API 生成；项目列表页管理多个画布作品
 - **对话会话管理** — 左侧侧边栏，支持新建/切换/删除对话，Zustand + localStorage 持久化
 - **双主题系统** — 深色模式 + 浅色模式，画布独立主题切换
 - **参考图系统** — 文件上传 + 联网搜索（Openverse），参考强度滑块
@@ -99,11 +99,14 @@ SpiritLens/
 │   │   │   ├── character.py, scene.py, prop.py
 │   │   └── services/
 │   │       ├── generation.py    # 内存+Redis 双备份任务管理
+│   │       ├── task_persistence.py # PG 结果落库（Celery 任务与 API 共享）
+│   │       ├── object_storage.py   # 腾讯云 COS 上传（SigV4，零依赖）
 │   │       ├── providers/       # AI Provider 路由
 │   │       │   ├── __init__.py  # Provider 路由 + generate_image()
-│   │       │   └── xinghe.py    # 星河智云 (image+video)
+│   │       │   ├── xinghe.py    # 星河智云 (image+video)
+│   │       │   └── tianyi.py    # 天翼云 (video)
 │   │       ├── auth.py          # 认证逻辑 (hash/verify/token)
-│   │       ├── file_storage.py  # 文件保存 + 校验
+│   │       ├── file_storage.py  # 文件保存 + 校验（本地 + COS 分支）
 │   │       ├── model_capabilities.py # 模型能力注册表
 │   │       ├── web_search.py    # 联网搜索 (Openverse)
 │   │       ├── prompt_enhancer.py    # Prompt 润色
@@ -116,8 +119,8 @@ SpiritLens/
 │   ├── alembic/                 # 数据库迁移
 │   ├── scripts/                 # 数据迁移 + 运维脚本
 │   ├── tests/                   # 37+ API 集成测试
-│   ├── tasks.py                 # Celery 任务定义
-│   ├── celery_app.py            # Celery 应用
+│   ├── tasks.py                 # Celery 任务定义（generate_image / generate_video）
+│   ├── celery_app.py            # Celery 应用（image/video 队列路由）
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── deploy/                      # 部署配置
@@ -153,8 +156,9 @@ SpiritLens/
 | FastAPI | Web 框架 + WebSocket |
 | SQLAlchemy 2.0 (async) | ORM |
 | PostgreSQL 16 (生产) / SQLite (开发) | 数据库 |
-| Redis 7 | 缓存 + Celery Broker + 任务结果 |
-| Celery | 异步任务队列（图片生成） |
+| Redis 7 | 缓存 + Celery Broker + 任务状态 |
+| Celery | 异步任务队列（图片 `image` 队列 + 视频 `video` 队列，threads pool） |
+| 腾讯云 COS + CDN | 对象存储（SigV4 直传，公有读私有写，播放走 CDN 不占服务器带宽） |
 | Alembic | 数据库迁移 |
 | JWT (python-jose) | 认证 |
 | httpx | 异步 HTTP 客户端 |
@@ -275,19 +279,20 @@ docker compose -f docker-compose.prod.yml -p spiritlens logs -f
 - 尺寸自动缩放（自动放大到模型最低像素要求，保留比例，按 64px 步长对齐）
 - 参考图上传 + 联网搜索（Openverse 免费搜索引擎）
 - 参考强度滑块（0~100%）
-- 生成图片自动保存到本地（永久存储）
+- 生成图片自动上传腾讯云 COS（永久存储，播放走 CDN；COS 不可用时回退本地）
 - 批量生图（多次 API 调用实现 batch）
 - Seed 支持（控制可复现性）
 
 ### AI 视频生成（已接入真实模型）
-- 对接星河智云 Seedance 系列（2.0 / 2.0 Fast）
+- 对接星河智云 Seedance 系列（2.0 / 2.0 Fast）+ 天翼云 Seedance（2.0 天翼云）
 - 文生视频 / 图生视频 / 首尾帧
 - 参考图使用 OpenAI 兼容格式（`content` 数组 + `image_url`）
-- Seedance 2.0 和 2.0 Fast 带参考图生成已验证可用
+- **天翼云参考图用 base64 内联**：天翼云后端无法抓取外部 URL（自定义域名与腾讯云 COS 域名均失败），参考图先下载 → Pillow 压缩（768px/JPEG q85，1.9MB→55KB）→ base64 data URI 内联传输，最多 12 张（2026-08-11 前端自动截取超限部分）
+- **天翼云参考音频（2026-08-11 接入）**：BGM/配音参考，`audio_url` + data URI 内联；ffmpeg 压缩 mp3 mono，**时长上限 15.2s 自动截取**；须搭配参考图使用；导演工作台 + AI 视频页支持上传 + `@音频N` 引用
 - 长视频支持（最长 2 小时轮询）
 - 参考图多角色多张（导演工作台支持从资产库选取角色/场景/道具图作为参考）
-- 前端轮询超时 20 分钟，支持长视频生成
-- 后端线程轮询 + 本地下载播放
+- 生成全流程走 Celery 队列：上游生成 → **流式下载**（分块写盘不占内存）→ 上传 COS → CDN 播放
+- 可取消（下载中途也能中断）、失败重试、worker 崩溃兜底（Redis 状态 + 启动清扫；`acks_late` 部署重启不丢任务，2026-08-11）
 
 ### AI 文本生成（DeepSeek）
 - DeepSeek-V4-Flash 官方 API 接入
@@ -318,6 +323,7 @@ SpiritLens 提供完整的影视级项目管理流程：
 - 画面比例（16:9 / 9:16 / 1:1）三阶段持久共享
 - 集数支持 .docx 上传 / 粘贴剧本 / 整本小说导入
 - 自定义镜头：手动添加 + 独立提示词生成视频
+- **多人协作不互相覆盖**（2026-08-10）：集配置保存带乐观锁（`if_updated_before` + 409 冲突重试合并）；丢失状态的视频按 prompt 从后端找回（recover?include_project=true）
 - 所有数据持久化到 PostgreSQL，刷新不丢失
 
 ### 双主题系统
@@ -366,6 +372,11 @@ SpiritLens 提供完整的影视级项目管理流程：
 - [ ] 监控与告警
 - [ ] 前端单元测试
 - [ ] 更多 provider 接入（BFL / Stability AI）
+- [x] 忘记密码/密码重置 — **管理员手动重置已上线**（`POST /admin/users/{id}/reset-password`，管理后台 → 用户管理 → 重置密码；登录页提示联系管理员）
+- [ ] 用户自助重置（短信验证码 或 邮箱链接二选一；前提：先补「绑定手机号/邮箱」功能，注册时两者均为可选，存量用户大多未绑定）
+  - 短信方案：需企业资质 + 短信服务商（阿里云/腾讯云短信，约 ¥0.04~0.05/条）
+  - 邮箱方案：SMTP 邮箱授权码零成本，需加 `aiosmtplib` + `SMTP_*` 环境变量
+  - 设计要点已定：验证码存 Redis（TTL 自动过期）、重置 JWT 复用 `SECRET_KEY`（`type="reset"`）、防枚举 + 限流，详见 `docs/API.md`「规划中」小节
 
 ---
 
@@ -373,21 +384,35 @@ SpiritLens 提供完整的影视级项目管理流程：
 
 ### 增量部署（改一处部署一处）
 
-参见 `deploy/README.md`：
+参见 `deploy/README.md`。**注意：后端/worker 代码必须 `build + up -d`（镜像含代码），`restart` 不会更新容器内代码与环境变量，`docker cp` 会被镜像重建覆盖**：
 
 ```bash
-# Python 文件
+# 后端 / Celery worker（Python 文件）
 scp -i ~/.ssh/clawshop backend/app/xxx.py ubuntu@server:~/spiritlens/backend/app/xxx.py
-ssh -i ~/.ssh/clawshop ubuntu@server "docker cp ~/spiritlens/backend/app/xxx.py spiritlens-backend-1:/app/app/xxx.py && docker restart spiritlens-backend-1"
+ssh -i ~/.ssh/clawshop ubuntu@server "cd ~/spiritlens && docker compose -f docker-compose.prod.yml -p spiritlens build backend celery-image celery-video && docker compose -f docker-compose.prod.yml -p spiritlens up -d backend celery-image celery-video"
+
+# 仅改 .env 配置（不涉及代码）
+ssh -i ~/.ssh/clawshop ubuntu@server "cd ~/spiritlens && docker compose -f docker-compose.prod.yml -p spiritlens up -d backend celery-image celery-video"
 
 # 前端文件
 scp -i ~/.ssh/clawshop frontend/xxx.tsx ubuntu@server:~/spiritlens/frontend/xxx.tsx
-ssh -i ~/.ssh/clawshop ubuntu@server "cd ~/spiritlens && docker compose -f docker-compose.prod.yml -p spiritlens build --no-cache frontend && docker compose -f docker-compose.prod.yml -p spiritlens up -d frontend"
+ssh -i ~/.ssh/clawshop ubuntu@server "cd ~/spiritlens && docker compose -f docker-compose.prod.yml -p spiritlens build frontend && docker compose -f docker-compose.prod.yml -p spiritlens up -d frontend"
 
 # nginx
 scp -i ~/.ssh/clawshop deploy/nginx-spiritlens.conf ubuntu@server:~/spiritlens/deploy/
 ssh -i ~/.ssh/clawshop ubuntu@server "sudo cp ~/spiritlens/deploy/nginx-spiritlens.conf /etc/nginx/sites-available/clawshop && sudo nginx -t && sudo systemctl reload nginx"
 ```
+
+### 生成并发调优（环境变量，无需改代码）
+
+**项目根 `.env`**（服务器 `/home/ubuntu/spiritlens/.env`，compose 插值源；不是 backend/.env）中调整后 `up -d` 两个 worker 容器即可。当前生产值：图片 128 + 视频 192 = **320 并发槽位**（4 核 CPU 极限附近；天翼云 API 并发已签约 400，本地追满需加服务器/加核）。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CELERY_IMAGE_CONCURRENCY` | 16 | 图片生成并发（线程池） |
+| `CELERY_VIDEO_CONCURRENCY` | 16 | 视频生成并发（线程池） |
+| `UVICORN_WORKERS` | 4 | 后端 API 进程数 |
+| `OSS_*` | 关 | 对象存储配置（见 `deploy/README.md`） |
 
 ---
 

@@ -12,6 +12,8 @@ import {
   Sun,
   Moon,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useAuthStore } from "@/store/auth";
 import { useTheme } from "@/store/theme";
@@ -27,6 +29,7 @@ interface LogItem {
   prompt: string | null;
   status: "pending" | "processing" | "completed" | "failed";
   model_id: string;
+  task_id: string;
   error_message: string | null;
   created_at: string | null;
 }
@@ -67,6 +70,14 @@ export default function AdminLogsContent() {
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [filterDate, setFilterDate] = useState("");
+  const [showCalendar, setShowCalendar] = useState(false);
+  const today = new Date();
+  const [calYear, setCalYear] = useState(today.getFullYear());
+  const [calMonth, setCalMonth] = useState(today.getMonth() + 1);
+  const daysInMonth = new Date(calYear, calMonth, 0).getDate();
+  const firstDayOfWeek = new Date(calYear, calMonth - 1, 1).getDay();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -80,10 +91,11 @@ export default function AdminLogsContent() {
   }, [mounted, isAuthenticated, user, router]);
 
   // Reset logs when filters change
-  const resetFilters = useCallback((type: string, status: string, q: string) => {
+  const resetFilters = useCallback((type: string, status: string, q: string, date?: string) => {
     setFilterType(type);
     setFilterStatus(status);
     setSearch(q);
+    if (date !== undefined) setFilterDate(date);
     setLogs([]);
     setPage(1);
     setTotal(0);
@@ -100,6 +112,7 @@ export default function AdminLogsContent() {
       if (filterType) params.type = filterType;
       if (filterStatus) params.status = filterStatus;
       if (search) params.q = search;
+      if (filterDate) params.date = filterDate;
       const res = await api.get<LogsResponse>("/api/v1/admin/logs", params);
       if (append) {
         setLogs((prev) => [...prev, ...res.logs]);
@@ -113,7 +126,7 @@ export default function AdminLogsContent() {
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [filterType, filterStatus, search]);
+  }, [filterType, filterStatus, filterDate, search]);
 
   // Initial load + reload on filter change
   useEffect(() => {
@@ -253,6 +266,78 @@ export default function AdminLogsContent() {
               </button>
             ))}
           </div>
+
+          {/* Month calendar picker */}
+          <div className="relative">
+            <button
+              onClick={() => setShowCalendar(!showCalendar)}
+              className="flex items-center gap-2 rounded-xl border border-border-subtle bg-surface-card px-3 py-2 text-xs text-text-primary hover:border-brand-cyan/30 transition-colors"
+            >
+              {filterDate || "选择日期"}
+              {filterDate && (
+                <span
+                  onClick={(e) => { e.stopPropagation(); resetFilters(filterType, filterStatus, search, ""); }}
+                  className="ml-1 text-text-muted hover:text-text-primary"
+                >
+                  ✕
+                </span>
+              )}
+            </button>
+            {showCalendar && (
+              <div className="absolute left-0 top-full z-50 mt-1 w-72 rounded-xl border border-border-subtle bg-surface-overlay/95 p-3 shadow-xl backdrop-blur-xl">
+                {/* Month header */}
+                <div className="flex items-center justify-between mb-3">
+                  <button onClick={() => setCalMonth(calMonth - 1)} className="rounded-lg p-1 text-text-muted hover:text-text-primary hover:bg-surface-light transition-colors">
+                    <ChevronLeft className="size-4" />
+                  </button>
+                  <span className="text-sm font-medium text-text-primary">{calYear}年{calMonth}月</span>
+                  <button onClick={() => setCalMonth(calMonth + 1)} className="rounded-lg p-1 text-text-muted hover:text-text-primary hover:bg-surface-light transition-colors">
+                    <ChevronRight className="size-4" />
+                  </button>
+                </div>
+                {/* Day-of-week header */}
+                <div className="grid grid-cols-7 mb-1">
+                  {["日", "一", "二", "三", "四", "五", "六"].map((d) => (
+                    <div key={d} className="text-center text-[10px] font-medium text-text-muted py-1">{d}</div>
+                  ))}
+                </div>
+                {/* Days grid */}
+                <div className="grid grid-cols-7">
+                  {Array.from({ length: firstDayOfWeek }).map((_, i) => (
+                    <div key={`empty-${i}`} />
+                  ))}
+                  {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+                    const dateStr = `${calYear}-${String(calMonth).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                    const isSelected = filterDate === dateStr;
+                    const isToday = dateStr === todayStr;
+                    return (
+                      <button
+                        key={day}
+                        onClick={() => {
+                          if (filterDate === dateStr) {
+                            resetFilters(filterType, filterStatus, search, "");
+                          } else {
+                            resetFilters(filterType, filterStatus, search, dateStr);
+                          }
+                          setShowCalendar(false);
+                        }}
+                        className={cn(
+                          "rounded-lg py-1.5 text-xs transition-colors",
+                          isSelected
+                            ? "bg-brand-cyan/20 text-brand-cyan font-bold"
+                            : isToday
+                              ? "text-brand-cyan"
+                              : "text-text-secondary hover:bg-surface-light hover:text-text-primary"
+                        )}
+                      >
+                        {day}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -263,13 +348,14 @@ export default function AdminLogsContent() {
             <table className="w-full text-sm table-fixed">
               <thead>
                 <tr className="border-b border-border-subtle bg-surface-elevated/50">
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[14%]">用户</th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[10%]">类型</th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[26%]">内容</th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[16%]">模型</th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[10%]">状态</th>
-                  <th className="text-right px-4 py-3 text-xs font-medium text-text-muted w-[14%]">时间</th>
-                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[10%]">详情</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[12%]">用户</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[9%]">类型</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[24%]">内容</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[11%]">模型</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[13%]">任务ID</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[9%]">状态</th>
+                  <th className="text-right px-4 py-3 text-xs font-medium text-text-muted w-[13%]">时间</th>
+                  <th className="text-left px-4 py-3 text-xs font-medium text-text-muted w-[9%]">详情</th>
                 </tr>
               </thead>
               <tbody>
@@ -320,6 +406,17 @@ export default function AdminLogsContent() {
                       </td>
                       <td className="px-4 py-3.5 text-text-secondary text-xs truncate">
                         {log.model_id || "—"}
+                      </td>
+                      <td className="px-4 py-3.5">
+                        {log.task_id ? (
+                          <button
+                            className="block max-w-[120px] truncate font-mono text-[10px] text-text-muted hover:text-brand-cyan transition-colors"
+                            title={`${log.task_id}（点击复制）`}
+                            onClick={() => { navigator.clipboard.writeText(log.task_id).catch(() => {}); }}
+                          >
+                            {log.task_id}
+                          </button>
+                        ) : "—"}
                       </td>
                       <td className="px-4 py-3.5">
                         <span className={cn(

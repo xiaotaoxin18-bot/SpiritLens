@@ -34,31 +34,31 @@ export default function ShotCard({ shot, index, isActive, onClick, onDelete }: P
           : "border-border-subtle hover:border-border-glow hover:shadow-lg"
       )}
     >
-      {/* Header */}
-      <div className="px-3 py-2 bg-surface-elevated border-b border-border-subtle flex justify-between items-center">
+      {/* Header — compact */}
+      <div className="px-2 py-1 bg-surface-elevated border-b border-border-subtle flex justify-between items-center">
         <span className={cn(
-          "font-mono text-[10px] font-bold",
+          "font-mono text-[9px] font-bold",
           isActive ? "text-brand-cyan" : "text-text-muted"
         )}>
           {displayNumber}
         </span>
-        <div className="flex items-center gap-1.5">
-          <span className="text-[9px] px-1.5 py-0.5 bg-surface-base text-text-muted rounded uppercase">
+        <div className="flex items-center gap-1">
+          <span className="text-[8px] px-1 py-0.5 bg-surface-base text-text-muted rounded uppercase">
             {shot.cameraMovement}
           </span>
           {onDelete && (
             <button
-              onClick={(e) => { e.stopPropagation(); onDelete(shot.id); }}
-              className="p-1 rounded-md text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
+              onClick={(e) => { e.stopPropagation(); if (window.confirm("确定删除该镜头？")) onDelete(shot.id); }}
+              className="p-0.5 rounded text-text-muted hover:text-red-400 hover:bg-red-500/10 transition-all opacity-0 group-hover:opacity-100"
             >
-              <Trash2 className="size-3" />
+              <Trash2 className="size-2.5" />
             </button>
           )}
         </div>
       </div>
 
-      {/* Thumbnail */}
-      <div className="aspect-video bg-surface-elevated relative flex items-center justify-center overflow-hidden">
+      {/* Thumbnail — compact */}
+      <div className="aspect-[2/1] bg-surface-elevated relative flex items-center justify-center overflow-hidden">
         {/* Default hero background when no image or video generated */}
         {!hasImage && !hasVideo && !isGeneratingKf && (
           <>
@@ -122,9 +122,9 @@ export default function ShotCard({ shot, index, isActive, onClick, onDelete }: P
         )}
       </div>
 
-      {/* Action summary */}
-      <div className="px-3 py-2 min-h-0">
-        <p className="text-[10px] text-text-secondary leading-relaxed line-clamp-2">
+      {/* Action summary — mini */}
+      <div className="px-2 py-1 min-h-0">
+        <p className="text-[8px] text-text-secondary leading-none truncate">
           {shot.actionSummary}
         </p>
       </div>

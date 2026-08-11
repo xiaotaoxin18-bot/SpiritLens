@@ -4,6 +4,7 @@ services:
   # ─── PostgreSQL ───
   postgres:
     image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=200"]  # 4×uvicorn pool(30) + celery 任务临时连接
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
@@ -33,12 +34,34 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # ─── Celery Worker ───
-  celery:
+  # ─── Celery Worker: 图片队列 ───
+  celery-image:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.celery_app worker --pool=threads --concurrency=4 --loglevel=info
+    command: celery -A app.celery_app worker -Q image --pool=threads --concurrency=${CELERY_IMAGE_CONCURRENCY:-16} --prefetch-multiplier=1 --loglevel=info
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:${DB_PASSWORD:-postgres}@postgres:5432/spiritlens
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Celery Worker: 视频队列 ───
+  celery-video:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: celery -A app.celery_app worker -Q video --pool=threads --concurrency=${CELERY_VIDEO_CONCURRENCY:-16} --prefetch-multiplier=1 --loglevel=info
     env_file:
       - ./backend/.env
     environment:
@@ -60,6 +83,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-4}
     ports:
       - "${BACKEND_PORT:-8085}:8000"
     env_file:
